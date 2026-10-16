@@ -1310,3 +1310,5 @@ SDL_DYNAPI_PROC(void,SDL_ReleaseGPUTimestampQueryPool,(SDL_GPUDevice *a,SDL_GPUT
 SDL_DYNAPI_PROC(bool,SDL_WriteGPUPassTimestamps,(SDL_GPUCommandBuffer *a,SDL_GPUTimestampQueryPool *b,Uint32 c,Uint32 d),(a,b,c,d),return)
 SDL_DYNAPI_PROC(bool,SDL_GetGPUTimestampQueryResults,(SDL_GPUDevice *a,SDL_GPUTimestampQueryPool *b,Uint32 c,Uint32 d,Uint64 *e),(a,b,c,d,e),return)
 SDL_DYNAPI_PROC(bool,SDL_GetGPUTimestampCalibration,(SDL_GPUDevice *a,SDL_GPUTimestampQueryPool *b,Uint64 *c,float *d),(a,b,c,d),return)
+SDL_DYNAPI_PROC(void*,SDL_GetGPUCommandBufferNativeHandle,(SDL_GPUCommandBuffer *a),(a),return)
+SDL_DYNAPI_PROC(void*,SDL_GetGPUTextureNativeHandle,(SDL_GPUCommandBuffer *a,SDL_GPUTexture *b),(a,b),return)

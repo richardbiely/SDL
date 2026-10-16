@@ -2608,13 +2608,73 @@ extern SDL_DECLSPEC SDL_GPUShaderFormat SDLCALL SDL_GetGPUShaderFormats(SDL_GPUD
  * \threadsafety It is safe to call this function from any thread.
  *
  * \since This function is available since SDL 3.4.0.
+ *
+ * With the Metal backend, these properties expose the backend objects, for
+ * interoperating with Metal libraries such as MetalFX:
+ *
+ * - `SDL_PROP_GPU_DEVICE_METAL_DEVICE_POINTER`: the `id<MTLDevice>` the device
+ *   renders with.
+ * - `SDL_PROP_GPU_DEVICE_METAL_COMMAND_QUEUE_POINTER`: the `id<MTLCommandQueue>`
+ *   command buffers are created from.
+ *
+ * The objects belong to SDL and stay valid until SDL_DestroyGPUDevice().
  */
 extern SDL_DECLSPEC SDL_PropertiesID SDLCALL SDL_GetGPUDeviceProperties(SDL_GPUDevice *device);
+
+/**
+ * Get the backend command buffer that records an SDL command buffer.
+ *
+ * This lets work from libraries that take native objects, such as MetalFX, be
+ * encoded into the same command buffer between SDL passes. The command buffer
+ * must not have a render, compute or copy pass in progress while the
+ * application encodes into the native object, and the application must not
+ * leave any native encoder open.
+ *
+ * With the Metal backend this is an `id<MTLCommandBuffer>`. The handle is
+ * valid until the command buffer is submitted or canceled.
+ *
+ * \param command_buffer a command buffer with no pass in progress.
+ * \returns the native command buffer, or NULL on failure or when the backend
+ *          does not support it; call SDL_GetError() for more information.
+ *
+ * \threadsafety This function should only be called from the thread that
+ *               created the command buffer.
+ *
+ * \since This function is added by Robotronia's patch to SDL 3.4.16.
+ */
+extern SDL_DECLSPEC void * SDLCALL SDL_GetGPUCommandBufferNativeHandle(SDL_GPUCommandBuffer *command_buffer);
+
+/**
+ * Get the backend texture that currently holds an SDL texture's contents.
+ *
+ * The texture is kept alive until `command_buffer` completes, as though the
+ * command buffer used it. Cycling the texture in a later pass makes SDL back
+ * it with a different native texture, so query the handle again after any
+ * pass that cycles it.
+ *
+ * With the Metal backend this is an `id<MTLTexture>`.
+ *
+ * \param command_buffer the command buffer the native texture will be used
+ *                       with; it must have no pass in progress.
+ * \param texture the texture to query.
+ * \returns the native texture, or NULL on failure or when the backend does not
+ *          support it; call SDL_GetError() for more information.
+ *
+ * \threadsafety This function should only be called from the thread that
+ *               created the command buffer.
+ *
+ * \since This function is added by Robotronia's patch to SDL 3.4.16.
+ */
+extern SDL_DECLSPEC void * SDLCALL SDL_GetGPUTextureNativeHandle(
+    SDL_GPUCommandBuffer *command_buffer,
+    SDL_GPUTexture *texture);
 
 #define SDL_PROP_GPU_DEVICE_NAME_STRING               "SDL.gpu.device.name"
 #define SDL_PROP_GPU_DEVICE_DRIVER_NAME_STRING        "SDL.gpu.device.driver_name"
 #define SDL_PROP_GPU_DEVICE_DRIVER_VERSION_STRING     "SDL.gpu.device.driver_version"
 #define SDL_PROP_GPU_DEVICE_DRIVER_INFO_STRING        "SDL.gpu.device.driver_info"
+#define SDL_PROP_GPU_DEVICE_METAL_DEVICE_POINTER        "SDL.gpu.device.metal.device"
+#define SDL_PROP_GPU_DEVICE_METAL_COMMAND_QUEUE_POINTER "SDL.gpu.device.metal.command_queue"
 
 
 /* State Creation */

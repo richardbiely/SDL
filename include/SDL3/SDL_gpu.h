@@ -598,6 +598,28 @@ typedef struct SDL_GPUCopyPass SDL_GPUCopyPass;
 typedef struct SDL_GPUFence SDL_GPUFence;
 
 /**
+ * An opaque handle representing a pool of GPU timestamp queries.
+ *
+ * Used to measure how long render, compute and copy passes take on the GPU.
+ * This is a CityZens extension of SDL GPU; it is not part of upstream SDL.
+ *
+ * \sa SDL_CreateGPUTimestampQueryPool
+ * \sa SDL_WriteGPUPassTimestamps
+ * \sa SDL_GetGPUTimestampQueryResults
+ * \sa SDL_GetGPUTimestampCalibration
+ * \sa SDL_ReleaseGPUTimestampQueryPool
+ */
+typedef struct SDL_GPUTimestampQueryPool SDL_GPUTimestampQueryPool;
+
+/**
+ * The value of a timestamp the GPU did not sample although its pass
+ * completed. Metal does not sample passes that do no work on the GPU.
+ *
+ * \sa SDL_GetGPUTimestampQueryResults
+ */
+#define SDL_GPU_TIMESTAMP_NOT_SAMPLED SDL_MAX_UINT64
+
+/**
  * Specifies the primitive topology of a graphics pipeline.
  *
  * If you are using POINTLIST you must include a point size output in the
@@ -4506,6 +4528,105 @@ extern SDL_DECLSPEC bool SDLCALL SDL_QueryGPUFence(
 extern SDL_DECLSPEC void SDLCALL SDL_ReleaseGPUFence(
     SDL_GPUDevice *device,
     SDL_GPUFence *fence);
+
+/* Timestamp Queries (CityZens extension) */
+
+/**
+ * Creates a pool of GPU timestamp queries.
+ *
+ * Only the Metal backend on GPUs that sample counters at stage boundaries
+ * (Apple silicon) and the Vulkan backend on queues with timestamp support
+ * implement timestamp queries. Other devices fail with SDL_Unsupported().
+ *
+ * \param device a GPU context.
+ * \param num_timestamps the number of timestamps in the pool. Metal allows
+ *                       at most 4096.
+ * \returns a timestamp query pool on success, or NULL on failure; call
+ *          SDL_GetError() for more information.
+ *
+ * \sa SDL_ReleaseGPUTimestampQueryPool
+ */
+extern SDL_DECLSPEC SDL_GPUTimestampQueryPool * SDLCALL SDL_CreateGPUTimestampQueryPool(
+    SDL_GPUDevice *device,
+    Uint32 num_timestamps);
+
+/**
+ * Releases a timestamp query pool.
+ *
+ * Waits until the GPU is idle, so that no submitted pass still writes to it.
+ *
+ * \param device a GPU context.
+ * \param pool the pool to release.
+ */
+extern SDL_DECLSPEC void SDLCALL SDL_ReleaseGPUTimestampQueryPool(
+    SDL_GPUDevice *device,
+    SDL_GPUTimestampQueryPool *pool);
+
+/**
+ * Times the next render, compute or copy pass begun on a command buffer.
+ *
+ * The next SDL_BeginGPURenderPass(), SDL_BeginGPUComputePass() or
+ * SDL_BeginGPUCopyPass() call on the command buffer writes a timestamp when
+ * the pass starts executing to `begin_index` and one when it finishes to
+ * `end_index`. Both timestamps read as 0 until the GPU has written them.
+ *
+ * Must not be called during a pass. Do not reuse an index that a submitted
+ * command buffer may still write.
+ *
+ * \param command_buffer a command buffer.
+ * \param pool the pool that receives the timestamps.
+ * \param begin_index the index of the timestamp written at the pass start.
+ * \param end_index the index of the timestamp written at the pass end.
+ * \returns true on success, false on failure; call SDL_GetError() for more
+ *          information.
+ */
+extern SDL_DECLSPEC bool SDLCALL SDL_WriteGPUPassTimestamps(
+    SDL_GPUCommandBuffer *command_buffer,
+    SDL_GPUTimestampQueryPool *pool,
+    Uint32 begin_index,
+    Uint32 end_index);
+
+/**
+ * Reads timestamps from a pool without waiting for the GPU.
+ *
+ * A timestamp reads as 0 until the command buffer of the pass timed with
+ * SDL_WriteGPUPassTimestamps() completes, and as
+ * SDL_GPU_TIMESTAMP_NOT_SAMPLED if the GPU did not sample it. Others are GPU
+ * ticks; see SDL_GetGPUTimestampCalibration().
+ *
+ * \param device a GPU context.
+ * \param pool the pool to read.
+ * \param first_index the first timestamp to read.
+ * \param num_timestamps the number of timestamps to read.
+ * \param timestamps receives `num_timestamps` values.
+ * \returns true on success, false on failure; call SDL_GetError() for more
+ *          information.
+ */
+extern SDL_DECLSPEC bool SDLCALL SDL_GetGPUTimestampQueryResults(
+    SDL_GPUDevice *device,
+    SDL_GPUTimestampQueryPool *pool,
+    Uint32 first_index,
+    Uint32 num_timestamps,
+    Uint64 *timestamps);
+
+/**
+ * Reads the GPU timestamp counter now, for aligning GPU and CPU timelines.
+ *
+ * On Vulkan this submits a command buffer and waits for it, so the value
+ * lags the moment of the call by the submission latency.
+ *
+ * \param device a GPU context.
+ * \param pool a timestamp query pool of the device.
+ * \param gpu_timestamp receives the current GPU timestamp in ticks.
+ * \param nanoseconds_per_tick receives the length of a tick.
+ * \returns true on success, false on failure; call SDL_GetError() for more
+ *          information.
+ */
+extern SDL_DECLSPEC bool SDLCALL SDL_GetGPUTimestampCalibration(
+    SDL_GPUDevice *device,
+    SDL_GPUTimestampQueryPool *pool,
+    Uint64 *gpu_timestamp,
+    float *nanoseconds_per_tick);
 
 /* Format Info */
 

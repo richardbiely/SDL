@@ -1078,7 +1078,6 @@ typedef struct VulkanCommandBuffer
     Sint32 usedUniformBufferCapacity;
 
     VulkanFenceHandle *inFlightFence;
-    bool autoReleaseFence;
 
     bool swapchainRequested;
     bool isDefrag; // Whether this CB was created for defragging
@@ -1244,6 +1243,7 @@ static void VULKAN_ReleaseWindow(SDL_GPURenderer *driverData, SDL_Window *window
 static bool VULKAN_Wait(SDL_GPURenderer *driverData);
 static bool VULKAN_WaitForFences(SDL_GPURenderer *driverData, bool waitAll, SDL_GPUFence *const *fences, Uint32 numFences);
 static bool VULKAN_Submit(SDL_GPUCommandBuffer *commandBuffer);
+static bool VULKAN_INTERNAL_Submit(SDL_GPUCommandBuffer *commandBuffer, VulkanFenceHandle **acquiredFence);
 static SDL_GPUCommandBuffer *VULKAN_AcquireCommandBuffer(SDL_GPURenderer *driverData);
 
 // Error Handling
@@ -9787,8 +9787,6 @@ static SDL_GPUCommandBuffer *VULKAN_AcquireCommandBuffer(
     SDL_zeroa(commandBuffer->readOnlyComputeStorageTextures);
     SDL_zeroa(commandBuffer->readOnlyComputeStorageBuffers);
 
-    commandBuffer->autoReleaseFence = true;
-
     commandBuffer->swapchainRequested = false;
     commandBuffer->isDefrag = 0;
 
@@ -10623,7 +10621,9 @@ static void VULKAN_INTERNAL_CleanCommandBuffer(
     VulkanCommandBuffer *commandBuffer,
     bool cancel)
 {
-    if (commandBuffer->autoReleaseFence) {
+    // The command buffer keeps its own reference until the GPU has finished it, so a fence that
+    // the caller of SDL_SubmitGPUCommandBufferAndAcquireFence released early is not reused meanwhile.
+    if (commandBuffer->inFlightFence != NULL) {
         VULKAN_ReleaseFence(
             (SDL_GPURenderer *)renderer,
             (SDL_GPUFence *)commandBuffer->inFlightFence);
@@ -10817,12 +10817,11 @@ static bool VULKAN_Wait(
 static SDL_GPUFence *VULKAN_SubmitAndAcquireFence(
     SDL_GPUCommandBuffer *commandBuffer)
 {
-    VulkanCommandBuffer *vulkanCommandBuffer = (VulkanCommandBuffer *)commandBuffer;
-    vulkanCommandBuffer->autoReleaseFence = false;
-    if (!VULKAN_Submit(commandBuffer)) {
+    VulkanFenceHandle *fence = NULL;
+    if (!VULKAN_INTERNAL_Submit(commandBuffer, &fence)) {
         return NULL;
     }
-    return (SDL_GPUFence *)vulkanCommandBuffer->inFlightFence;
+    return (SDL_GPUFence *)fence;
 }
 
 static void VULKAN_INTERNAL_ReleaseCommandBuffer(VulkanCommandBuffer *vulkanCommandBuffer)
@@ -10841,8 +10840,9 @@ static void VULKAN_INTERNAL_ReleaseCommandBuffer(VulkanCommandBuffer *vulkanComm
     renderer->submittedCommandBufferCount += 1;
 }
 
-static bool VULKAN_Submit(
-    SDL_GPUCommandBuffer *commandBuffer)
+static bool VULKAN_INTERNAL_Submit(
+    SDL_GPUCommandBuffer *commandBuffer,
+    VulkanFenceHandle **acquiredFence)
 {
     VulkanCommandBuffer *vulkanCommandBuffer = (VulkanCommandBuffer *)commandBuffer;
     VulkanRenderer *renderer = vulkanCommandBuffer->renderer;
@@ -10974,6 +10974,12 @@ static bool VULKAN_Submit(
             (presentData->windowData->frameCounter + 1) % renderer->allowedFramesInFlight;
     }
 
+    // The caller of SDL_SubmitGPUCommandBufferAndAcquireFence holds a reference of its own.
+    if (acquiredFence != NULL) {
+        (void)SDL_AtomicIncRef(&vulkanCommandBuffer->inFlightFence->referenceCount);
+        *acquiredFence = vulkanCommandBuffer->inFlightFence;
+    }
+
     if (performCleanups) {
         for (Sint32 i = renderer->submittedCommandBufferCount - 1; i >= 0; i -= 1) {
             vulkanResult = renderer->vkGetFenceStatus(
@@ -11020,6 +11026,12 @@ static bool VULKAN_Submit(
     return true;
 }
 
+static bool VULKAN_Submit(
+    SDL_GPUCommandBuffer *commandBuffer)
+{
+    return VULKAN_INTERNAL_Submit(commandBuffer, NULL);
+}
+
 static bool VULKAN_Cancel(
     SDL_GPUCommandBuffer *commandBuffer)
 {
@@ -11035,7 +11047,6 @@ static bool VULKAN_Cancel(
         VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
     CHECK_VULKAN_ERROR_AND_RETURN(result, vkResetCommandBuffer, false);
 
-    vulkanCommandBuffer->autoReleaseFence = false;
     SDL_LockMutex(renderer->submitLock);
     VULKAN_INTERNAL_CleanCommandBuffer(renderer, vulkanCommandBuffer, true);
     SDL_UnlockMutex(renderer->submitLock);

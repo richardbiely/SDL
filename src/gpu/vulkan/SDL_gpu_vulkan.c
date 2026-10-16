@@ -9024,6 +9024,20 @@ static void VULKAN_DownloadFromTexture(
         1,
         &imageCopy);
 
+    {
+        // Make the copy's writes visible to the host that maps the transfer buffer.
+        VkMemoryBarrier hostBarrier;
+        hostBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        hostBarrier.pNext = NULL;
+        hostBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        hostBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        renderer->vkCmdPipelineBarrier(
+            vulkanCommandBuffer->commandBuffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_HOST_BIT,
+            0, 1, &hostBarrier, 0, NULL, 0, NULL);
+    }
+
     VULKAN_INTERNAL_TextureSubresourceTransitionToDefaultUsage(
         renderer,
         vulkanCommandBuffer,
@@ -9067,6 +9081,20 @@ static void VULKAN_DownloadFromBuffer(
         transferBufferContainer->activeBuffer->buffer,
         1,
         &bufferCopy);
+
+    {
+        // Make the copy's writes visible to the host that maps the transfer buffer.
+        VkMemoryBarrier hostBarrier;
+        hostBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        hostBarrier.pNext = NULL;
+        hostBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        hostBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        renderer->vkCmdPipelineBarrier(
+            vulkanCommandBuffer->commandBuffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_HOST_BIT,
+            0, 1, &hostBarrier, 0, NULL, 0, NULL);
+    }
 
     VULKAN_INTERNAL_BufferTransitionToDefaultUsage(
         renderer,

@@ -452,6 +452,27 @@ typedef struct MetalFence
     SDL_AtomicInt referenceCount;
 } MetalFence;
 
+typedef struct MetalTimestampQueryPool
+{
+    id<MTLCounterSampleBuffer> handle;
+    Uint32 count;
+    // Per timestamp: nonzero once the command buffer that writes it has completed
+    SDL_AtomicInt *written;
+    // Per timestamp: the reported value, and the raw sample it came from. A sample that equals the
+    // previous one was not written again: the GPU skipped the pass.
+    Uint64 *values;
+    Uint64 *samples;
+    // Completion handlers that still resolve timestamps of this pool
+    SDL_AtomicInt pendingResolves;
+} MetalTimestampQueryPool;
+
+typedef struct MetalTimestampWrite
+{
+    MetalTimestampQueryPool *pool;
+    Uint32 beginIndex;
+    Uint32 endIndex;
+} MetalTimestampWrite;
+
 typedef struct MetalWindowData
 {
     SDL_Window *window;
@@ -611,6 +632,12 @@ typedef struct MetalCommandBuffer
     MetalTexture **usedTextures;
     Uint32 usedTextureCount;
     Uint32 usedTextureCapacity;
+
+    // Timestamp Queries; pendingTimestampWrite.pool is NULL when the next pass is not timed
+    MetalTimestampWrite pendingTimestampWrite;
+    MetalTimestampWrite *timestampWrites;
+    Uint32 timestampWriteCount;
+    Uint32 timestampWriteCapacity;
 } MetalCommandBuffer;
 
 typedef struct MetalSampler
@@ -734,6 +761,7 @@ static void METAL_DestroyDevice(SDL_GPUDevice *device)
         SDL_free(commandBuffer->usedTextures);
         SDL_free(commandBuffer->usedUniformBuffers);
         SDL_free(commandBuffer->windowDatas);
+        SDL_free(commandBuffer->timestampWrites);
         SDL_free(commandBuffer);
     }
     SDL_free(renderer->availableCommandBuffers);
@@ -1785,6 +1813,196 @@ static void METAL_UnmapTransferBuffer(
 #endif
 }
 
+// Timestamp Queries
+
+static bool METAL_INTERNAL_TakePendingTimestampWrite(
+    MetalCommandBuffer *commandBuffer,
+    MetalTimestampWrite *timestampWrite)
+{
+    if (commandBuffer->pendingTimestampWrite.pool == NULL) {
+        return false;
+    }
+
+    *timestampWrite = commandBuffer->pendingTimestampWrite;
+    commandBuffer->pendingTimestampWrite.pool = NULL;
+
+    if (commandBuffer->timestampWriteCount >= commandBuffer->timestampWriteCapacity) {
+        commandBuffer->timestampWriteCapacity = SDL_max(commandBuffer->timestampWriteCapacity * 2, 16);
+        commandBuffer->timestampWrites = SDL_realloc(
+            commandBuffer->timestampWrites,
+            sizeof(MetalTimestampWrite) * commandBuffer->timestampWriteCapacity);
+    }
+    commandBuffer->timestampWrites[commandBuffer->timestampWriteCount] = *timestampWrite;
+    commandBuffer->timestampWriteCount += 1;
+    return true;
+}
+
+static void METAL_INTERNAL_ResolveTimestamp(
+    MetalTimestampQueryPool *pool,
+    Uint32 index)
+{
+    Uint64 sample = 0;
+    if (@available(macOS 11.0, iOS 14.0, tvOS 14.0, *)) {
+        NSData *data = [pool->handle resolveCounterRange:NSMakeRange(index, 1)];
+        if (data != nil && data.length >= sizeof(MTLCounterResultTimestamp)) {
+            sample = ((const MTLCounterResultTimestamp *)data.bytes)->timestamp;
+        }
+    }
+    const bool sampled = sample != 0 && sample != MTLCounterErrorValue && sample != pool->samples[index];
+    pool->values[index] = sampled ? sample : SDL_GPU_TIMESTAMP_NOT_SAMPLED;
+    pool->samples[index] = sample;
+    SDL_SetAtomicInt(&pool->written[index], 1);
+}
+
+// Runs once the GPU has finished the command buffer that timed these passes
+static void METAL_INTERNAL_ResolveTimestamps(
+    const MetalTimestampWrite *timestampWrites,
+    Uint32 timestampWriteCount)
+{
+    @autoreleasepool {
+        for (Uint32 i = 0; i < timestampWriteCount; i += 1) {
+            const MetalTimestampWrite *timestampWrite = &timestampWrites[i];
+            METAL_INTERNAL_ResolveTimestamp(timestampWrite->pool, timestampWrite->beginIndex);
+            METAL_INTERNAL_ResolveTimestamp(timestampWrite->pool, timestampWrite->endIndex);
+            (void)SDL_AtomicDecRef(&timestampWrite->pool->pendingResolves);
+        }
+    }
+}
+
+static SDL_GPUTimestampQueryPool *METAL_CreateTimestampQueryPool(
+    SDL_GPURenderer *driverData,
+    Uint32 numTimestamps)
+{
+    @autoreleasepool {
+        MetalRenderer *renderer = (MetalRenderer *)driverData;
+
+        if (@available(macOS 11.0, iOS 14.0, tvOS 14.0, *)) {
+            if (![renderer->device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) {
+                SDL_Unsupported();
+                return NULL;
+            }
+
+            id<MTLCounterSet> timestampCounterSet = nil;
+            for (id<MTLCounterSet> counterSet in renderer->device.counterSets) {
+                if ([counterSet.name isEqualToString:MTLCommonCounterSetTimestamp]) {
+                    timestampCounterSet = counterSet;
+                    break;
+                }
+            }
+            if (timestampCounterSet == nil) {
+                SDL_Unsupported();
+                return NULL;
+            }
+
+            MTLCounterSampleBufferDescriptor *descriptor = [[MTLCounterSampleBufferDescriptor alloc] init];
+            descriptor.counterSet = timestampCounterSet;
+            descriptor.sampleCount = numTimestamps;
+            descriptor.storageMode = MTLStorageModeShared;
+            descriptor.label = @"SDL_GPUTimestampQueryPool";
+
+            NSError *error = nil;
+            id<MTLCounterSampleBuffer> handle = [renderer->device newCounterSampleBufferWithDescriptor:descriptor error:&error];
+            if (handle == nil) {
+                SDL_SetError("Could not create timestamp sample buffer: %s", error.localizedDescription.UTF8String);
+                return NULL;
+            }
+
+            MetalTimestampQueryPool *pool = SDL_calloc(1, sizeof(MetalTimestampQueryPool));
+            pool->handle = handle;
+            pool->count = numTimestamps;
+            pool->written = SDL_calloc(numTimestamps, sizeof(SDL_AtomicInt));
+            pool->values = SDL_calloc(numTimestamps, sizeof(Uint64));
+            pool->samples = SDL_calloc(numTimestamps, sizeof(Uint64));
+            return (SDL_GPUTimestampQueryPool *)pool;
+        }
+
+        SDL_Unsupported();
+        return NULL;
+    }
+}
+
+static void METAL_ReleaseTimestampQueryPool(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTimestampQueryPool *timestampQueryPool)
+{
+    MetalTimestampQueryPool *pool = (MetalTimestampQueryPool *)timestampQueryPool;
+
+    (void)METAL_Wait(driverData);
+    // Completion handlers can still run after the wait returns
+    while (SDL_GetAtomicInt(&pool->pendingResolves) > 0) {
+        SDL_Delay(1);
+    }
+    pool->handle = nil;
+    SDL_free(pool->written);
+    SDL_free(pool->values);
+    SDL_free(pool->samples);
+    SDL_free(pool);
+}
+
+static bool METAL_WritePassTimestamps(
+    SDL_GPUCommandBuffer *commandBuffer,
+    SDL_GPUTimestampQueryPool *timestampQueryPool,
+    Uint32 beginIndex,
+    Uint32 endIndex)
+{
+    MetalCommandBuffer *metalCommandBuffer = (MetalCommandBuffer *)commandBuffer;
+    MetalTimestampQueryPool *pool = (MetalTimestampQueryPool *)timestampQueryPool;
+
+    if (beginIndex >= pool->count || endIndex >= pool->count || beginIndex == endIndex) {
+        return SDL_SetError("Invalid timestamp indices %u and %u for a pool of %u", beginIndex, endIndex, pool->count);
+    }
+
+    SDL_SetAtomicInt(&pool->written[beginIndex], 0);
+    SDL_SetAtomicInt(&pool->written[endIndex], 0);
+    metalCommandBuffer->pendingTimestampWrite.pool = pool;
+    metalCommandBuffer->pendingTimestampWrite.beginIndex = beginIndex;
+    metalCommandBuffer->pendingTimestampWrite.endIndex = endIndex;
+    return true;
+}
+
+static bool METAL_GetTimestampQueryResults(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTimestampQueryPool *timestampQueryPool,
+    Uint32 firstIndex,
+    Uint32 numTimestamps,
+    Uint64 *timestamps)
+{
+    MetalTimestampQueryPool *pool = (MetalTimestampQueryPool *)timestampQueryPool;
+    (void)driverData;
+
+    if (firstIndex >= pool->count || numTimestamps > pool->count - firstIndex) {
+        return SDL_SetError("Timestamp range %u+%u exceeds a pool of %u", firstIndex, numTimestamps, pool->count);
+    }
+
+    for (Uint32 i = 0; i < numTimestamps; i += 1) {
+        const bool written = SDL_GetAtomicInt(&pool->written[firstIndex + i]) != 0;
+        timestamps[i] = written ? pool->values[firstIndex + i] : 0;
+    }
+    return true;
+}
+
+static bool METAL_GetTimestampCalibration(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTimestampQueryPool *timestampQueryPool,
+    Uint64 *gpuTimestamp,
+    float *nanosecondsPerTick)
+{
+    MetalRenderer *renderer = (MetalRenderer *)driverData;
+    (void)timestampQueryPool;
+
+    if (@available(macOS 11.0, iOS 14.0, tvOS 14.0, *)) {
+        MTLTimestamp cpuTimestamp = 0;
+        MTLTimestamp gpuTimestampNow = 0;
+        [renderer->device sampleTimestamps:&cpuTimestamp gpuTimestamp:&gpuTimestampNow];
+        *gpuTimestamp = gpuTimestampNow;
+        // GPUs that sample at stage boundaries (Apple silicon) count nanoseconds
+        *nanosecondsPerTick = 1.0f;
+        return true;
+    }
+
+    return SDL_Unsupported();
+}
+
 // Copy Pass
 
 static void METAL_BeginCopyPass(
@@ -1792,6 +2010,17 @@ static void METAL_BeginCopyPass(
 {
     @autoreleasepool {
         MetalCommandBuffer *metalCommandBuffer = (MetalCommandBuffer *)commandBuffer;
+        MetalTimestampWrite timestampWrite;
+        if (METAL_INTERNAL_TakePendingTimestampWrite(metalCommandBuffer, &timestampWrite)) {
+            if (@available(macOS 11.0, iOS 14.0, tvOS 14.0, *)) {
+                MTLBlitPassDescriptor *passDescriptor = [MTLBlitPassDescriptor blitPassDescriptor];
+                passDescriptor.sampleBufferAttachments[0].sampleBuffer = timestampWrite.pool->handle;
+                passDescriptor.sampleBufferAttachments[0].startOfEncoderSampleIndex = timestampWrite.beginIndex;
+                passDescriptor.sampleBufferAttachments[0].endOfEncoderSampleIndex = timestampWrite.endIndex;
+                metalCommandBuffer->blitEncoder = [metalCommandBuffer->handle blitCommandEncoderWithDescriptor:passDescriptor];
+                return;
+            }
+        }
         metalCommandBuffer->blitEncoder = [metalCommandBuffer->handle blitCommandEncoder];
     }
 }
@@ -2278,6 +2507,18 @@ static void METAL_BeginRenderPass(
         SDL_GPUViewport viewport;
         SDL_Rect scissorRect;
         SDL_FColor blendConstants;
+        MetalTimestampWrite timestampWrite;
+
+        if (METAL_INTERNAL_TakePendingTimestampWrite(metalCommandBuffer, &timestampWrite)) {
+            if (@available(macOS 11.0, iOS 14.0, tvOS 14.0, *)) {
+                // Stage-boundary sampling: the pass starts with its vertex stage and ends with its fragment stage
+                passDescriptor.sampleBufferAttachments[0].sampleBuffer = timestampWrite.pool->handle;
+                passDescriptor.sampleBufferAttachments[0].startOfVertexSampleIndex = timestampWrite.beginIndex;
+                passDescriptor.sampleBufferAttachments[0].endOfVertexSampleIndex = MTLCounterDontSample;
+                passDescriptor.sampleBufferAttachments[0].startOfFragmentSampleIndex = MTLCounterDontSample;
+                passDescriptor.sampleBufferAttachments[0].endOfFragmentSampleIndex = timestampWrite.endIndex;
+            }
+        }
 
         for (Uint32 i = 0; i < numColorTargets; i += 1) {
             MetalTextureContainer *container = (MetalTextureContainer *)colorTargetInfos[i].texture;
@@ -3115,7 +3356,20 @@ static void METAL_BeginComputePass(
         MetalBufferContainer *bufferContainer;
         MetalBuffer *buffer;
 
-        metalCommandBuffer->computeEncoder = [metalCommandBuffer->handle computeCommandEncoder];
+        MetalTimestampWrite timestampWrite;
+        metalCommandBuffer->computeEncoder = nil;
+        if (METAL_INTERNAL_TakePendingTimestampWrite(metalCommandBuffer, &timestampWrite)) {
+            if (@available(macOS 11.0, iOS 14.0, tvOS 14.0, *)) {
+                MTLComputePassDescriptor *passDescriptor = [MTLComputePassDescriptor computePassDescriptor];
+                passDescriptor.sampleBufferAttachments[0].sampleBuffer = timestampWrite.pool->handle;
+                passDescriptor.sampleBufferAttachments[0].startOfEncoderSampleIndex = timestampWrite.beginIndex;
+                passDescriptor.sampleBufferAttachments[0].endOfEncoderSampleIndex = timestampWrite.endIndex;
+                metalCommandBuffer->computeEncoder = [metalCommandBuffer->handle computeCommandEncoderWithDescriptor:passDescriptor];
+            }
+        }
+        if (metalCommandBuffer->computeEncoder == nil) {
+            metalCommandBuffer->computeEncoder = [metalCommandBuffer->handle computeCommandEncoder];
+        }
 
         for (Uint32 i = 0; i < numStorageTextureBindings; i += 1) {
             textureContainer = (MetalTextureContainer *)storageTextureBindings[i].texture;
@@ -3456,6 +3710,10 @@ static void METAL_INTERNAL_CleanCommandBuffer(
 
     // Reset presentation
     commandBuffer->windowDataCount = 0;
+
+    // Reset timestamp queries
+    commandBuffer->pendingTimestampWrite.pool = NULL;
+    commandBuffer->timestampWriteCount = 0;
 
     // Reset bindings
     for (i = 0; i < MAX_VERTEX_BUFFERS; i += 1) {
@@ -4101,6 +4359,21 @@ static bool METAL_INTERNAL_Submit(
             windowData->frameCounter = (windowData->frameCounter + 1) % renderer->allowedFramesInFlight;
         }
 
+        // Resolve the timed passes once the GPU has finished them; the command buffer may be
+        // reused before the handler runs, so it resolves its own copy of the list
+        if (metalCommandBuffer->timestampWriteCount > 0) {
+            const Uint32 timestampWriteCount = metalCommandBuffer->timestampWriteCount;
+            MetalTimestampWrite *timestampWrites = SDL_malloc(sizeof(MetalTimestampWrite) * timestampWriteCount);
+            SDL_memcpy(timestampWrites, metalCommandBuffer->timestampWrites, sizeof(MetalTimestampWrite) * timestampWriteCount);
+            for (Uint32 i = 0; i < timestampWriteCount; i += 1) {
+                (void)SDL_AtomicIncRef(&timestampWrites[i].pool->pendingResolves);
+            }
+            [metalCommandBuffer->handle addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+              METAL_INTERNAL_ResolveTimestamps(timestampWrites, timestampWriteCount);
+              SDL_free(timestampWrites);
+            }];
+        }
+
         // Submit the command buffer
         [metalCommandBuffer->handle commit];
         metalCommandBuffer->handle = nil;
@@ -4671,6 +4944,11 @@ static SDL_GPUDevice *METAL_CreateDevice(bool debugMode, bool preferLowPower, SD
 
         SDL_GPUDevice *result = SDL_calloc(1, sizeof(SDL_GPUDevice));
         ASSIGN_DRIVER(METAL)
+        result->CreateTimestampQueryPool = METAL_CreateTimestampQueryPool;
+        result->ReleaseTimestampQueryPool = METAL_ReleaseTimestampQueryPool;
+        result->WritePassTimestamps = METAL_WritePassTimestamps;
+        result->GetTimestampQueryResults = METAL_GetTimestampQueryResults;
+        result->GetTimestampCalibration = METAL_GetTimestampCalibration;
         result->driverData = (SDL_GPURenderer *)renderer;
         result->shader_formats = SDL_GPU_SHADERFORMAT_MSL | SDL_GPU_SHADERFORMAT_METALLIB;
         renderer->sdlGPUDevice = result;

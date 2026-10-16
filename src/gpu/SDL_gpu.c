@@ -3554,6 +3554,118 @@ void SDL_ReleaseGPUFence(
         fence);
 }
 
+// Timestamp Queries (CityZens extension)
+
+SDL_GPUTimestampQueryPool *SDL_CreateGPUTimestampQueryPool(
+    SDL_GPUDevice *device,
+    Uint32 num_timestamps)
+{
+    CHECK_DEVICE_MAGIC(device, NULL);
+
+    CHECK_PARAM(num_timestamps == 0) {
+        SDL_InvalidParamError("num_timestamps");
+        return NULL;
+    }
+
+    if (device->CreateTimestampQueryPool == NULL) {
+        SDL_Unsupported();
+        return NULL;
+    }
+
+    return device->CreateTimestampQueryPool(
+        device->driverData,
+        num_timestamps);
+}
+
+void SDL_ReleaseGPUTimestampQueryPool(
+    SDL_GPUDevice *device,
+    SDL_GPUTimestampQueryPool *pool)
+{
+    CHECK_DEVICE_MAGIC(device, );
+
+    CHECK_PARAM(pool == NULL) {
+        return;
+    }
+
+    device->ReleaseTimestampQueryPool(
+        device->driverData,
+        pool);
+}
+
+bool SDL_WriteGPUPassTimestamps(
+    SDL_GPUCommandBuffer *command_buffer,
+    SDL_GPUTimestampQueryPool *pool,
+    Uint32 begin_index,
+    Uint32 end_index)
+{
+    CHECK_PARAM(command_buffer == NULL) {
+        return SDL_InvalidParamError("command_buffer");
+    }
+    CHECK_PARAM(pool == NULL) {
+        return SDL_InvalidParamError("pool");
+    }
+
+    if (COMMAND_BUFFER_DEVICE->debug_mode) {
+        CHECK_COMMAND_BUFFER_RETURN_FALSE
+        CHECK_ANY_PASS_IN_PROGRESS("Cannot time a pass while a pass is in progress!", false)
+    }
+
+    return COMMAND_BUFFER_DEVICE->WritePassTimestamps(
+        command_buffer,
+        pool,
+        begin_index,
+        end_index);
+}
+
+bool SDL_GetGPUTimestampQueryResults(
+    SDL_GPUDevice *device,
+    SDL_GPUTimestampQueryPool *pool,
+    Uint32 first_index,
+    Uint32 num_timestamps,
+    Uint64 *timestamps)
+{
+    CHECK_DEVICE_MAGIC(device, false);
+
+    CHECK_PARAM(pool == NULL) {
+        return SDL_InvalidParamError("pool");
+    }
+    CHECK_PARAM(timestamps == NULL && num_timestamps > 0) {
+        return SDL_InvalidParamError("timestamps");
+    }
+
+    return device->GetTimestampQueryResults(
+        device->driverData,
+        pool,
+        first_index,
+        num_timestamps,
+        timestamps);
+}
+
+bool SDL_GetGPUTimestampCalibration(
+    SDL_GPUDevice *device,
+    SDL_GPUTimestampQueryPool *pool,
+    Uint64 *gpu_timestamp,
+    float *nanoseconds_per_tick)
+{
+    CHECK_DEVICE_MAGIC(device, false);
+
+    CHECK_PARAM(pool == NULL) {
+        return SDL_InvalidParamError("pool");
+    }
+    CHECK_PARAM(gpu_timestamp == NULL) {
+        return SDL_InvalidParamError("gpu_timestamp");
+    }
+    CHECK_PARAM(nanoseconds_per_tick == NULL) {
+        return SDL_InvalidParamError("nanoseconds_per_tick");
+    }
+
+    return device->GetTimestampCalibration(
+        device->driverData,
+        pool,
+        gpu_timestamp,
+        nanoseconds_per_tick);
+}
+
 Uint32 SDL_CalculateGPUTextureFormatSize(
     SDL_GPUTextureFormat format,
     Uint32 width,

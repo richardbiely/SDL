@@ -1305,3 +1305,8 @@ SDL_DYNAPI_PROC(SDL_Surface*,SDL_RotateSurface,(SDL_Surface *a,float b),(a,b),re
 SDL_DYNAPI_PROC(SDL_Surface*,SDL_LoadSurface_IO,(SDL_IOStream *a,bool b),(a,b),return)
 SDL_DYNAPI_PROC(SDL_Surface*,SDL_LoadSurface,(const char *a),(a),return)
 SDL_DYNAPI_PROC(bool,SDL_SetWindowFillDocument,(SDL_Window *a,bool b),(a,b),return)
+SDL_DYNAPI_PROC(SDL_GPUTimestampQueryPool*,SDL_CreateGPUTimestampQueryPool,(SDL_GPUDevice *a,Uint32 b),(a,b),return)
+SDL_DYNAPI_PROC(void,SDL_ReleaseGPUTimestampQueryPool,(SDL_GPUDevice *a,SDL_GPUTimestampQueryPool *b),(a,b),)
+SDL_DYNAPI_PROC(bool,SDL_WriteGPUPassTimestamps,(SDL_GPUCommandBuffer *a,SDL_GPUTimestampQueryPool *b,Uint32 c,Uint32 d),(a,b,c,d),return)
+SDL_DYNAPI_PROC(bool,SDL_GetGPUTimestampQueryResults,(SDL_GPUDevice *a,SDL_GPUTimestampQueryPool *b,Uint32 c,Uint32 d,Uint64 *e),(a,b,c,d,e),return)
+SDL_DYNAPI_PROC(bool,SDL_GetGPUTimestampCalibration,(SDL_GPUDevice *a,SDL_GPUTimestampQueryPool *b,Uint64 *c,float *d),(a,b,c,d),return)

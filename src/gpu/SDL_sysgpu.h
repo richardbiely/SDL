@@ -1072,6 +1072,35 @@ struct SDL_GPUDevice
         SDL_GPURenderer *driverData,
         SDL_GPUFence *fence);
 
+    // Timestamp Queries (CityZens extension; NULL when unsupported)
+
+    SDL_GPUTimestampQueryPool *(*CreateTimestampQueryPool)(
+        SDL_GPURenderer *driverData,
+        Uint32 numTimestamps);
+
+    void (*ReleaseTimestampQueryPool)(
+        SDL_GPURenderer *driverData,
+        SDL_GPUTimestampQueryPool *pool);
+
+    bool (*WritePassTimestamps)(
+        SDL_GPUCommandBuffer *commandBuffer,
+        SDL_GPUTimestampQueryPool *pool,
+        Uint32 beginIndex,
+        Uint32 endIndex);
+
+    bool (*GetTimestampQueryResults)(
+        SDL_GPURenderer *driverData,
+        SDL_GPUTimestampQueryPool *pool,
+        Uint32 firstIndex,
+        Uint32 numTimestamps,
+        Uint64 *timestamps);
+
+    bool (*GetTimestampCalibration)(
+        SDL_GPURenderer *driverData,
+        SDL_GPUTimestampQueryPool *pool,
+        Uint64 *gpuTimestamp,
+        float *nanosecondsPerTick);
+
     // Feature Queries
 
     bool (*SupportsTextureFormat)(

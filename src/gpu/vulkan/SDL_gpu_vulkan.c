@@ -937,6 +937,23 @@ typedef struct VulkanFencePool
     Uint32 availableFenceCapacity;
 } VulkanFencePool;
 
+typedef struct VulkanTimestampQueryPool
+{
+    VkQueryPool handle;
+    // Timestamps the caller writes; the query after them is reserved for calibration
+    Uint32 count;
+    Uint64 validMask;
+    // Per timestamp: nonzero once the command buffer that writes it has completed
+    SDL_AtomicInt *written;
+} VulkanTimestampQueryPool;
+
+typedef struct VulkanTimestampWrite
+{
+    VulkanTimestampQueryPool *pool;
+    Uint32 beginIndex;
+    Uint32 endIndex;
+} VulkanTimestampWrite;
+
 typedef struct VulkanCommandBuffer
 {
     CommandBufferCommonHeader common;
@@ -944,6 +961,13 @@ typedef struct VulkanCommandBuffer
 
     VkCommandBuffer commandBuffer;
     VulkanCommandPool *commandPool;
+
+    // Timestamp Queries; a NULL pool means the next or current pass is not timed
+    VulkanTimestampWrite pendingTimestampWrite;
+    VulkanTimestampWrite activeTimestampWrite;
+    VulkanTimestampWrite *timestampWrites;
+    Uint32 timestampWriteCount;
+    Uint32 timestampWriteCapacity;
 
     VulkanPresentData *presentDatas;
     Uint32 presentDataCount;
@@ -3213,6 +3237,7 @@ static void VULKAN_INTERNAL_DestroyCommandPool(
         SDL_free(commandBuffer->usedComputePipelines);
         SDL_free(commandBuffer->usedFramebuffers);
         SDL_free(commandBuffer->usedUniformBuffers);
+        SDL_free(commandBuffer->timestampWrites);
 
         SDL_free(commandBuffer);
     }
@@ -7885,6 +7910,55 @@ static void VULKAN_INTERNAL_PushUniformData(
     }
 }
 
+// Timestamp Queries
+
+static void VULKAN_INTERNAL_BeginPassTimestamps(
+    VulkanCommandBuffer *commandBuffer)
+{
+    VulkanRenderer *renderer = commandBuffer->renderer;
+    VulkanTimestampWrite timestampWrite = commandBuffer->pendingTimestampWrite;
+
+    if (timestampWrite.pool == NULL) {
+        return;
+    }
+    commandBuffer->pendingTimestampWrite.pool = NULL;
+
+    if (commandBuffer->timestampWriteCount >= commandBuffer->timestampWriteCapacity) {
+        commandBuffer->timestampWriteCapacity = SDL_max(commandBuffer->timestampWriteCapacity * 2, 16);
+        commandBuffer->timestampWrites = SDL_realloc(
+            commandBuffer->timestampWrites,
+            sizeof(VulkanTimestampWrite) * commandBuffer->timestampWriteCapacity);
+    }
+    commandBuffer->timestampWrites[commandBuffer->timestampWriteCount] = timestampWrite;
+    commandBuffer->timestampWriteCount += 1;
+
+    renderer->vkCmdResetQueryPool(commandBuffer->commandBuffer, timestampWrite.pool->handle, timestampWrite.beginIndex, 1);
+    renderer->vkCmdResetQueryPool(commandBuffer->commandBuffer, timestampWrite.pool->handle, timestampWrite.endIndex, 1);
+    renderer->vkCmdWriteTimestamp(
+        commandBuffer->commandBuffer,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        timestampWrite.pool->handle,
+        timestampWrite.beginIndex);
+    commandBuffer->activeTimestampWrite = timestampWrite;
+}
+
+static void VULKAN_INTERNAL_EndPassTimestamps(
+    VulkanCommandBuffer *commandBuffer)
+{
+    VulkanTimestampWrite timestampWrite = commandBuffer->activeTimestampWrite;
+
+    if (timestampWrite.pool == NULL) {
+        return;
+    }
+    commandBuffer->activeTimestampWrite.pool = NULL;
+
+    commandBuffer->renderer->vkCmdWriteTimestamp(
+        commandBuffer->commandBuffer,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        timestampWrite.pool->handle,
+        timestampWrite.endIndex);
+}
+
 static void VULKAN_BeginRenderPass(
     SDL_GPUCommandBuffer *commandBuffer,
     const SDL_GPUColorTargetInfo *colorTargetInfos,
@@ -8057,6 +8131,8 @@ static void VULKAN_BeginRenderPass(
     renderPassBeginInfo.renderArea.offset.x = 0;
     renderPassBeginInfo.renderArea.offset.y = 0;
 
+    VULKAN_INTERNAL_BeginPassTimestamps(vulkanCommandBuffer);
+
     renderer->vkCmdBeginRenderPass(
         vulkanCommandBuffer->commandBuffer,
         &renderPassBeginInfo,
@@ -8224,6 +8300,8 @@ static void VULKAN_EndRenderPass(
     renderer->vkCmdEndRenderPass(
         vulkanCommandBuffer->commandBuffer);
 
+    VULKAN_INTERNAL_EndPassTimestamps(vulkanCommandBuffer);
+
     for (i = 0; i < vulkanCommandBuffer->colorAttachmentSubresourceCount; i += 1) {
         VULKAN_INTERNAL_TextureSubresourceTransitionToDefaultUsage(
             renderer,
@@ -8328,6 +8406,8 @@ static void VULKAN_BeginComputePass(
             vulkanCommandBuffer,
             buffer);
     }
+
+    VULKAN_INTERNAL_BeginPassTimestamps(vulkanCommandBuffer);
 }
 
 static void VULKAN_BindComputePipeline(
@@ -8767,6 +8847,8 @@ static void VULKAN_EndComputePass(
     VulkanCommandBuffer *vulkanCommandBuffer = (VulkanCommandBuffer *)commandBuffer;
     Uint32 i;
 
+    VULKAN_INTERNAL_EndPassTimestamps(vulkanCommandBuffer);
+
     for (i = 0; i < vulkanCommandBuffer->readWriteComputeStorageTextureSubresourceCount; i += 1) {
         VULKAN_INTERNAL_TextureSubresourceTransitionToDefaultUsage(
             vulkanCommandBuffer->renderer,
@@ -8862,8 +8944,7 @@ static void VULKAN_UnmapTransferBuffer(
 static void VULKAN_BeginCopyPass(
     SDL_GPUCommandBuffer *commandBuffer)
 {
-    // no-op
-    (void)commandBuffer;
+    VULKAN_INTERNAL_BeginPassTimestamps((VulkanCommandBuffer *)commandBuffer);
 }
 
 static void VULKAN_UploadToTexture(
@@ -9357,8 +9438,7 @@ static void VULKAN_GenerateMipmaps(
 static void VULKAN_EndCopyPass(
     SDL_GPUCommandBuffer *commandBuffer)
 {
-    // no-op
-    (void)commandBuffer;
+    VULKAN_INTERNAL_EndPassTimestamps((VulkanCommandBuffer *)commandBuffer);
 }
 
 static void VULKAN_Blit(
@@ -9512,6 +9592,13 @@ static bool VULKAN_INTERNAL_AllocateCommandBuffer(
     commandBuffer->commandBuffer = commandBufferHandle;
 
     commandBuffer->inFlightFence = VK_NULL_HANDLE;
+
+    // Timestamp query tracking
+    SDL_zero(commandBuffer->pendingTimestampWrite);
+    SDL_zero(commandBuffer->activeTimestampWrite);
+    commandBuffer->timestampWrites = NULL;
+    commandBuffer->timestampWriteCount = 0;
+    commandBuffer->timestampWriteCapacity = 0;
 
     // Presentation tracking
 
@@ -10631,6 +10718,18 @@ static void VULKAN_INTERNAL_CleanCommandBuffer(
         commandBuffer->inFlightFence = NULL;
     }
 
+    // Timestamps of a completed command buffer are now readable
+    for (Uint32 i = 0; i < commandBuffer->timestampWriteCount; i += 1) {
+        VulkanTimestampWrite *timestampWrite = &commandBuffer->timestampWrites[i];
+        if (!cancel) {
+            SDL_SetAtomicInt(&timestampWrite->pool->written[timestampWrite->beginIndex], 1);
+            SDL_SetAtomicInt(&timestampWrite->pool->written[timestampWrite->endIndex], 1);
+        }
+    }
+    commandBuffer->timestampWriteCount = 0;
+    commandBuffer->pendingTimestampWrite.pool = NULL;
+    commandBuffer->activeTimestampWrite.pool = NULL;
+
     // Uniform buffers are now available
 
     SDL_LockMutex(renderer->acquireUniformBufferLock);
@@ -11051,6 +11150,190 @@ static bool VULKAN_Cancel(
     VULKAN_INTERNAL_CleanCommandBuffer(renderer, vulkanCommandBuffer, true);
     SDL_UnlockMutex(renderer->submitLock);
 
+    return true;
+}
+
+static bool VULKAN_INTERNAL_RunTimestampCommand(
+    VulkanRenderer *renderer,
+    VulkanTimestampQueryPool *pool,
+    bool resetAll)
+{
+    VulkanCommandBuffer *commandBuffer = (VulkanCommandBuffer *)VULKAN_AcquireCommandBuffer((SDL_GPURenderer *)renderer);
+    if (commandBuffer == NULL) {
+        return false;
+    }
+
+    if (resetAll) {
+        renderer->vkCmdResetQueryPool(commandBuffer->commandBuffer, pool->handle, 0, pool->count + 1);
+    } else {
+        renderer->vkCmdResetQueryPool(commandBuffer->commandBuffer, pool->handle, pool->count, 1);
+        renderer->vkCmdWriteTimestamp(
+            commandBuffer->commandBuffer,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            pool->handle,
+            pool->count);
+    }
+
+    SDL_GPUFence *fence = VULKAN_SubmitAndAcquireFence((SDL_GPUCommandBuffer *)commandBuffer);
+    if (fence == NULL) {
+        return false;
+    }
+    const bool completed = VULKAN_WaitForFences((SDL_GPURenderer *)renderer, true, &fence, 1);
+    VULKAN_ReleaseFence((SDL_GPURenderer *)renderer, fence);
+    return completed;
+}
+
+static void VULKAN_ReleaseTimestampQueryPool(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTimestampQueryPool *timestampQueryPool)
+{
+    VulkanRenderer *renderer = (VulkanRenderer *)driverData;
+    VulkanTimestampQueryPool *pool = (VulkanTimestampQueryPool *)timestampQueryPool;
+
+    (void)VULKAN_Wait(driverData);
+    renderer->vkDestroyQueryPool(renderer->logicalDevice, pool->handle, NULL);
+    SDL_free(pool->written);
+    SDL_free(pool);
+}
+
+static SDL_GPUTimestampQueryPool *VULKAN_CreateTimestampQueryPool(
+    SDL_GPURenderer *driverData,
+    Uint32 numTimestamps)
+{
+    VulkanRenderer *renderer = (VulkanRenderer *)driverData;
+    Uint32 queueFamilyCount = 0;
+    VkQueueFamilyProperties *queueFamilies;
+    Uint32 validBits;
+    VkQueryPoolCreateInfo createInfo;
+    VkResult result;
+
+    renderer->vkGetPhysicalDeviceQueueFamilyProperties(renderer->physicalDevice, &queueFamilyCount, NULL);
+    if (renderer->queueFamilyIndex >= queueFamilyCount) {
+        SDL_SetError("Invalid queue family index");
+        return NULL;
+    }
+    queueFamilies = SDL_stack_alloc(VkQueueFamilyProperties, queueFamilyCount);
+    renderer->vkGetPhysicalDeviceQueueFamilyProperties(renderer->physicalDevice, &queueFamilyCount, queueFamilies);
+    validBits = queueFamilies[renderer->queueFamilyIndex].timestampValidBits;
+    SDL_stack_free(queueFamilies);
+    if (validBits == 0 || renderer->physicalDeviceProperties.properties.limits.timestampPeriod <= 0.0f) {
+        SDL_Unsupported();
+        return NULL;
+    }
+
+    VulkanTimestampQueryPool *pool = SDL_calloc(1, sizeof(VulkanTimestampQueryPool));
+    pool->count = numTimestamps;
+    pool->validMask = validBits >= 64 ? ~(Uint64)0 : (((Uint64)1 << validBits) - 1);
+    pool->written = SDL_calloc(numTimestamps, sizeof(SDL_AtomicInt));
+
+    SDL_zero(createInfo);
+    createInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    createInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    createInfo.queryCount = numTimestamps + 1;
+    result = renderer->vkCreateQueryPool(renderer->logicalDevice, &createInfo, NULL, &pool->handle);
+    if (result != VK_SUCCESS) {
+        SDL_free(pool->written);
+        SDL_free(pool);
+        SET_ERROR_AND_RETURN("vkCreateQueryPool failed: %s", VkErrorMessages(result), NULL);
+    }
+
+    // Queries start uninitialized; reset them all so every later read is valid
+    if (!VULKAN_INTERNAL_RunTimestampCommand(renderer, pool, true)) {
+        VULKAN_ReleaseTimestampQueryPool(driverData, (SDL_GPUTimestampQueryPool *)pool);
+        return NULL;
+    }
+
+    return (SDL_GPUTimestampQueryPool *)pool;
+}
+
+static bool VULKAN_WritePassTimestamps(
+    SDL_GPUCommandBuffer *commandBuffer,
+    SDL_GPUTimestampQueryPool *timestampQueryPool,
+    Uint32 beginIndex,
+    Uint32 endIndex)
+{
+    VulkanCommandBuffer *vulkanCommandBuffer = (VulkanCommandBuffer *)commandBuffer;
+    VulkanTimestampQueryPool *pool = (VulkanTimestampQueryPool *)timestampQueryPool;
+
+    if (beginIndex >= pool->count || endIndex >= pool->count || beginIndex == endIndex) {
+        return SDL_SetError("Invalid timestamp indices %u and %u for a pool of %u", beginIndex, endIndex, pool->count);
+    }
+
+    SDL_SetAtomicInt(&pool->written[beginIndex], 0);
+    SDL_SetAtomicInt(&pool->written[endIndex], 0);
+    vulkanCommandBuffer->pendingTimestampWrite.pool = pool;
+    vulkanCommandBuffer->pendingTimestampWrite.beginIndex = beginIndex;
+    vulkanCommandBuffer->pendingTimestampWrite.endIndex = endIndex;
+    return true;
+}
+
+static bool VULKAN_GetTimestampQueryResults(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTimestampQueryPool *timestampQueryPool,
+    Uint32 firstIndex,
+    Uint32 numTimestamps,
+    Uint64 *timestamps)
+{
+    VulkanRenderer *renderer = (VulkanRenderer *)driverData;
+    VulkanTimestampQueryPool *pool = (VulkanTimestampQueryPool *)timestampQueryPool;
+
+    if (firstIndex >= pool->count || numTimestamps > pool->count - firstIndex) {
+        return SDL_SetError("Timestamp range %u+%u exceeds a pool of %u", firstIndex, numTimestamps, pool->count);
+    }
+
+    for (Uint32 i = 0; i < numTimestamps; i += 1) {
+        // Value and availability per query; a reset or never-written query is unavailable
+        Uint64 result[2] = { 0, 0 };
+        timestamps[i] = 0;
+        if (SDL_GetAtomicInt(&pool->written[firstIndex + i]) == 0) {
+            continue;
+        }
+        const VkResult status = renderer->vkGetQueryPoolResults(
+            renderer->logicalDevice,
+            pool->handle,
+            firstIndex + i,
+            1,
+            sizeof(result),
+            result,
+            sizeof(result),
+            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        if (status != VK_SUCCESS && status != VK_NOT_READY) {
+            SET_ERROR_AND_RETURN("vkGetQueryPoolResults failed: %s", VkErrorMessages(status), false);
+        }
+        if (result[1] != 0) {
+            timestamps[i] = result[0] & pool->validMask;
+        }
+    }
+    return true;
+}
+
+static bool VULKAN_GetTimestampCalibration(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTimestampQueryPool *timestampQueryPool,
+    Uint64 *gpuTimestamp,
+    float *nanosecondsPerTick)
+{
+    VulkanRenderer *renderer = (VulkanRenderer *)driverData;
+    VulkanTimestampQueryPool *pool = (VulkanTimestampQueryPool *)timestampQueryPool;
+    Uint64 result = 0;
+
+    if (!VULKAN_INTERNAL_RunTimestampCommand(renderer, pool, false)) {
+        return false;
+    }
+
+    const VkResult status = renderer->vkGetQueryPoolResults(
+        renderer->logicalDevice,
+        pool->handle,
+        pool->count,
+        1,
+        sizeof(result),
+        &result,
+        sizeof(result),
+        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+    CHECK_VULKAN_ERROR_AND_RETURN(status, vkGetQueryPoolResults, false);
+
+    *gpuTimestamp = result & pool->validMask;
+    *nanosecondsPerTick = renderer->physicalDeviceProperties.properties.limits.timestampPeriod;
     return true;
 }
 
@@ -12960,6 +13243,11 @@ static SDL_GPUDevice *VULKAN_CreateDevice(bool debugMode, bool preferLowPower, S
     // FIXME: just move this into this function
     result = (SDL_GPUDevice *)SDL_calloc(1, sizeof(SDL_GPUDevice));
     ASSIGN_DRIVER(VULKAN)
+    result->CreateTimestampQueryPool = VULKAN_CreateTimestampQueryPool;
+    result->ReleaseTimestampQueryPool = VULKAN_ReleaseTimestampQueryPool;
+    result->WritePassTimestamps = VULKAN_WritePassTimestamps;
+    result->GetTimestampQueryResults = VULKAN_GetTimestampQueryResults;
+    result->GetTimestampCalibration = VULKAN_GetTimestampCalibration;
 
     result->driverData = (SDL_GPURenderer *)renderer;
     result->shader_formats = SDL_GPU_SHADERFORMAT_SPIRV;

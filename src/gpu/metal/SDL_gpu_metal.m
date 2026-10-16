@@ -454,7 +454,8 @@ typedef struct MetalFence
 
 typedef struct MetalTimestampQueryPool
 {
-    id<MTLCounterSampleBuffer> handle;
+    // id<MTLCounterSampleBuffer>, which needs macOS 10.15, iOS 14 or tvOS 14
+    id handle;
     Uint32 count;
     // Per timestamp: nonzero once the command buffer that writes it has completed
     SDL_AtomicInt *written;

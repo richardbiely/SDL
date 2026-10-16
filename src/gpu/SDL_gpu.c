@@ -796,6 +796,44 @@ SDL_PropertiesID SDL_GetGPUDeviceProperties(SDL_GPUDevice *device)
     return device->GetDeviceProperties(device);
 }
 
+void *SDL_GetGPUCommandBufferNativeHandle(SDL_GPUCommandBuffer *command_buffer)
+{
+    CHECK_PARAM(command_buffer == NULL) {
+        SDL_InvalidParamError("command_buffer");
+        return NULL;
+    }
+    if (COMMAND_BUFFER_DEVICE->debug_mode) {
+        CHECK_COMMAND_BUFFER_RETURN_NULL
+        CHECK_ANY_PASS_IN_PROGRESS("Cannot get a native command buffer during a pass!", NULL)
+    }
+    if (COMMAND_BUFFER_DEVICE->GetCommandBufferNativeHandle == NULL) {
+        SDL_Unsupported();
+        return NULL;
+    }
+    return COMMAND_BUFFER_DEVICE->GetCommandBufferNativeHandle(command_buffer);
+}
+
+void *SDL_GetGPUTextureNativeHandle(SDL_GPUCommandBuffer *command_buffer, SDL_GPUTexture *texture)
+{
+    CHECK_PARAM(command_buffer == NULL) {
+        SDL_InvalidParamError("command_buffer");
+        return NULL;
+    }
+    CHECK_PARAM(texture == NULL) {
+        SDL_InvalidParamError("texture");
+        return NULL;
+    }
+    if (COMMAND_BUFFER_DEVICE->debug_mode) {
+        CHECK_COMMAND_BUFFER_RETURN_NULL
+        CHECK_ANY_PASS_IN_PROGRESS("Cannot get a native texture during a pass!", NULL)
+    }
+    if (COMMAND_BUFFER_DEVICE->GetTextureNativeHandle == NULL) {
+        SDL_Unsupported();
+        return NULL;
+    }
+    return COMMAND_BUFFER_DEVICE->GetTextureNativeHandle(command_buffer, texture);
+}
+
 Uint32 SDL_GPUTextureFormatTexelBlockSize(
     SDL_GPUTextureFormat format)
 {

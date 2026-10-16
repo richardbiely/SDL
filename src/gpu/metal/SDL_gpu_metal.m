@@ -824,6 +824,26 @@ static void METAL_INTERNAL_TrackTexture(
         usedTextureCapacity);
 }
 
+// Native interop
+
+static void *METAL_GetCommandBufferNativeHandle(SDL_GPUCommandBuffer *commandBuffer)
+{
+    MetalCommandBuffer *metalCommandBuffer = (MetalCommandBuffer *)commandBuffer;
+    return (__bridge void *)metalCommandBuffer->handle;
+}
+
+static void *METAL_GetTextureNativeHandle(
+    SDL_GPUCommandBuffer *commandBuffer,
+    SDL_GPUTexture *texture)
+{
+    MetalCommandBuffer *metalCommandBuffer = (MetalCommandBuffer *)commandBuffer;
+    MetalTextureContainer *container = (MetalTextureContainer *)texture;
+    MetalTexture *metalTexture = container->activeTexture;
+    // Keep the texture alive until the application's native work on this command buffer completes.
+    METAL_INTERNAL_TrackTexture(metalCommandBuffer, metalTexture);
+    return (__bridge void *)metalTexture->handle;
+}
+
 static void METAL_INTERNAL_TrackUniformBuffer(
     MetalCommandBuffer *commandBuffer,
     MetalUniformBuffer *uniformBuffer)
@@ -4867,6 +4887,8 @@ static SDL_GPUDevice *METAL_CreateDevice(bool debugMode, bool preferLowPower, SD
         renderer->queue = [device newCommandQueue];
 
         renderer->props = SDL_CreateProperties();
+        SDL_SetPointerProperty(renderer->props, SDL_PROP_GPU_DEVICE_METAL_DEVICE_POINTER, (__bridge void *)renderer->device);
+        SDL_SetPointerProperty(renderer->props, SDL_PROP_GPU_DEVICE_METAL_COMMAND_QUEUE_POINTER, (__bridge void *)renderer->queue);
         if (verboseLogs) {
             SDL_LogInfo(SDL_LOG_CATEGORY_GPU, "SDL_GPU Driver: Metal");
         }
@@ -4949,6 +4971,8 @@ static SDL_GPUDevice *METAL_CreateDevice(bool debugMode, bool preferLowPower, SD
         result->WritePassTimestamps = METAL_WritePassTimestamps;
         result->GetTimestampQueryResults = METAL_GetTimestampQueryResults;
         result->GetTimestampCalibration = METAL_GetTimestampCalibration;
+        result->GetCommandBufferNativeHandle = METAL_GetCommandBufferNativeHandle;
+        result->GetTextureNativeHandle = METAL_GetTextureNativeHandle;
         result->driverData = (SDL_GPURenderer *)renderer;
         result->shader_formats = SDL_GPU_SHADERFORMAT_MSL | SDL_GPU_SHADERFORMAT_METALLIB;
         renderer->sdlGPUDevice = result;

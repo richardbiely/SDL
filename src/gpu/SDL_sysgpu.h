@@ -671,6 +671,14 @@ struct SDL_GPUDevice
 
     SDL_PropertiesID (*GetDeviceProperties)(SDL_GPUDevice *device);
 
+    // Native interop; NULL when the backend does not expose its objects.
+
+    void *(*GetCommandBufferNativeHandle)(SDL_GPUCommandBuffer *commandBuffer);
+
+    void *(*GetTextureNativeHandle)(
+        SDL_GPUCommandBuffer *commandBuffer,
+        SDL_GPUTexture *texture);
+
     // State Creation
 
     SDL_GPUComputePipeline *(*CreateComputePipeline)(

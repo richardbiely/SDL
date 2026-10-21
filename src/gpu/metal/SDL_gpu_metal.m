@@ -1423,6 +1423,11 @@ static SDL_GPUSampler *METAL_CreateSampler(
         samplerDesc.mipFilter = SDLToMetal_MipFilter[createinfo->mipmap_mode]; // FIXME: Is this right with non-mipmapped samplers?
         samplerDesc.lodMinClamp = createinfo->min_lod;
         samplerDesc.lodMaxClamp = createinfo->max_lod;
+#ifdef __MAC_26_0 // SDKs that know MTLSamplerDescriptor.lodBias
+        if (@available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)) {
+            samplerDesc.lodBias = createinfo->mip_lod_bias;
+        }
+#endif
         samplerDesc.maxAnisotropy = (NSUInteger)((createinfo->enable_anisotropy) ? createinfo->max_anisotropy : 1);
         samplerDesc.compareFunction = (createinfo->enable_compare) ? SDLToMetal_CompareOp[createinfo->compare_op] : MTLCompareFunctionAlways;
 

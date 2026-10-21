@@ -1068,34 +1068,42 @@ typedef struct VulkanCommandBuffer
     VulkanBuffer **usedBuffers;
     Sint32 usedBufferCount;
     Sint32 usedBufferCapacity;
+    GPUResourceSet usedBufferSet;
 
     VulkanBuffer **buffersUsedInPendingTransfers;
     Sint32 buffersUsedInPendingTransfersCount;
     Sint32 buffersUsedInPendingTransfersCapacity;
+    GPUResourceSet buffersUsedInPendingTransfersSet;
 
     VulkanTexture **usedTextures;
     Sint32 usedTextureCount;
     Sint32 usedTextureCapacity;
+    GPUResourceSet usedTextureSet;
 
     VulkanTexture **texturesUsedInPendingTransfers;
     Sint32 texturesUsedInPendingTransfersCount;
     Sint32 texturesUsedInPendingTransfersCapacity;
+    GPUResourceSet texturesUsedInPendingTransfersSet;
 
     VulkanSampler **usedSamplers;
     Sint32 usedSamplerCount;
     Sint32 usedSamplerCapacity;
+    GPUResourceSet usedSamplerSet;
 
     VulkanGraphicsPipeline **usedGraphicsPipelines;
     Sint32 usedGraphicsPipelineCount;
     Sint32 usedGraphicsPipelineCapacity;
+    GPUResourceSet usedGraphicsPipelineSet;
 
     VulkanComputePipeline **usedComputePipelines;
     Sint32 usedComputePipelineCount;
     Sint32 usedComputePipelineCapacity;
+    GPUResourceSet usedComputePipelineSet;
 
     VulkanFramebuffer **usedFramebuffers;
     Sint32 usedFramebufferCount;
     Sint32 usedFramebufferCapacity;
+    GPUResourceSet usedFramebufferSet;
 
     VulkanUniformBuffer **usedUniformBuffers;
     Sint32 usedUniformBufferCount;
@@ -2412,11 +2420,9 @@ static Uint8 VULKAN_INTERNAL_BindMemoryForBuffer(
 
 // Resource tracking
 
-#define TRACK_RESOURCE(resource, type, array, count, capacity, refcountvar)  \
-    for (Sint32 i = commandBuffer->count - 1; i >= 0; i -= 1) { \
-        if (commandBuffer->array[i] == resource) {              \
-            return;                                             \
-        }                                                       \
+#define TRACK_RESOURCE(resource, type, array, count, capacity, set, refcountvar) \
+    if (GPUResourceSet_Insert(&commandBuffer->set, resource)) { \
+        return;                                                 \
     }                                                           \
                                                                 \
     if (commandBuffer->count == commandBuffer->capacity) {      \
@@ -2440,6 +2446,7 @@ static void VULKAN_INTERNAL_TrackBuffer(
         usedBuffers,
         usedBufferCount,
         usedBufferCapacity,
+        usedBufferSet,
         buffer->referenceCount);
 }
 
@@ -2455,6 +2462,7 @@ static void VULKAN_INTERNAL_TrackBufferTransfer(
         buffersUsedInPendingTransfers,
         buffersUsedInPendingTransfersCount,
         buffersUsedInPendingTransfersCapacity,
+        buffersUsedInPendingTransfersSet,
         buffer->usedRegion->allocation->referenceCount);
 }
 
@@ -2468,6 +2476,7 @@ static void VULKAN_INTERNAL_TrackTexture(
         usedTextures,
         usedTextureCount,
         usedTextureCapacity,
+        usedTextureSet,
         texture->referenceCount);
 }
 
@@ -2487,6 +2496,7 @@ static void VULKAN_INTERNAL_TrackTextureTransfer(
         texturesUsedInPendingTransfers,
         texturesUsedInPendingTransfersCount,
         texturesUsedInPendingTransfersCapacity,
+        texturesUsedInPendingTransfersSet,
         texture->usedRegion->allocation->referenceCount);
 }
 
@@ -2500,6 +2510,7 @@ static void VULKAN_INTERNAL_TrackSampler(
         usedSamplers,
         usedSamplerCount,
         usedSamplerCapacity,
+        usedSamplerSet,
         sampler->referenceCount);
 }
 
@@ -2513,6 +2524,7 @@ static void VULKAN_INTERNAL_TrackGraphicsPipeline(
         usedGraphicsPipelines,
         usedGraphicsPipelineCount,
         usedGraphicsPipelineCapacity,
+        usedGraphicsPipelineSet,
         graphicsPipeline->referenceCount);
 }
 
@@ -2526,6 +2538,7 @@ static void VULKAN_INTERNAL_TrackComputePipeline(
         usedComputePipelines,
         usedComputePipelineCount,
         usedComputePipelineCapacity,
+        usedComputePipelineSet,
         computePipeline->referenceCount);
 }
 
@@ -2539,6 +2552,7 @@ static void VULKAN_INTERNAL_TrackFramebuffer(
         usedFramebuffers,
         usedFramebufferCount,
         usedFramebufferCapacity,
+        usedFramebufferSet,
         framebuffer->referenceCount);
 }
 
@@ -3225,13 +3239,21 @@ static void VULKAN_INTERNAL_DestroyCommandPool(
         SDL_free(commandBuffer->waitSemaphores);
         SDL_free(commandBuffer->signalSemaphores);
         SDL_free(commandBuffer->usedBuffers);
+        GPUResourceSet_Destroy(&commandBuffer->usedBufferSet);
         SDL_free(commandBuffer->buffersUsedInPendingTransfers);
+        GPUResourceSet_Destroy(&commandBuffer->buffersUsedInPendingTransfersSet);
         SDL_free(commandBuffer->usedTextures);
+        GPUResourceSet_Destroy(&commandBuffer->usedTextureSet);
         SDL_free(commandBuffer->texturesUsedInPendingTransfers);
+        GPUResourceSet_Destroy(&commandBuffer->texturesUsedInPendingTransfersSet);
         SDL_free(commandBuffer->usedSamplers);
+        GPUResourceSet_Destroy(&commandBuffer->usedSamplerSet);
         SDL_free(commandBuffer->usedGraphicsPipelines);
+        GPUResourceSet_Destroy(&commandBuffer->usedGraphicsPipelineSet);
         SDL_free(commandBuffer->usedComputePipelines);
+        GPUResourceSet_Destroy(&commandBuffer->usedComputePipelineSet);
         SDL_free(commandBuffer->usedFramebuffers);
+        GPUResourceSet_Destroy(&commandBuffer->usedFramebufferSet);
         SDL_free(commandBuffer->usedUniformBuffers);
         SDL_free(commandBuffer->timestampWrites);
 
@@ -9608,41 +9630,49 @@ static bool VULKAN_INTERNAL_AllocateCommandBuffer(
 
     commandBuffer->usedBufferCapacity = 4;
     commandBuffer->usedBufferCount = 0;
+    SDL_zero(commandBuffer->usedBufferSet);
     commandBuffer->usedBuffers = SDL_malloc(
         commandBuffer->usedBufferCapacity * sizeof(VulkanBuffer *));
 
     commandBuffer->buffersUsedInPendingTransfersCapacity = 4;
     commandBuffer->buffersUsedInPendingTransfersCount = 0;
+    SDL_zero(commandBuffer->buffersUsedInPendingTransfersSet);
     commandBuffer->buffersUsedInPendingTransfers = SDL_malloc(
         commandBuffer->buffersUsedInPendingTransfersCapacity * sizeof(VulkanBuffer *));
 
     commandBuffer->usedTextureCapacity = 4;
     commandBuffer->usedTextureCount = 0;
+    SDL_zero(commandBuffer->usedTextureSet);
     commandBuffer->usedTextures = SDL_malloc(
         commandBuffer->usedTextureCapacity * sizeof(VulkanTexture *));
 
     commandBuffer->texturesUsedInPendingTransfersCapacity = 4;
     commandBuffer->texturesUsedInPendingTransfersCount = 0;
+    SDL_zero(commandBuffer->texturesUsedInPendingTransfersSet);
     commandBuffer->texturesUsedInPendingTransfers = SDL_malloc(
         commandBuffer->texturesUsedInPendingTransfersCapacity * sizeof(VulkanTexture *));
 
     commandBuffer->usedSamplerCapacity = 4;
     commandBuffer->usedSamplerCount = 0;
+    SDL_zero(commandBuffer->usedSamplerSet);
     commandBuffer->usedSamplers = SDL_malloc(
         commandBuffer->usedSamplerCapacity * sizeof(VulkanSampler *));
 
     commandBuffer->usedGraphicsPipelineCapacity = 4;
     commandBuffer->usedGraphicsPipelineCount = 0;
+    SDL_zero(commandBuffer->usedGraphicsPipelineSet);
     commandBuffer->usedGraphicsPipelines = SDL_malloc(
         commandBuffer->usedGraphicsPipelineCapacity * sizeof(VulkanGraphicsPipeline *));
 
     commandBuffer->usedComputePipelineCapacity = 4;
     commandBuffer->usedComputePipelineCount = 0;
+    SDL_zero(commandBuffer->usedComputePipelineSet);
     commandBuffer->usedComputePipelines = SDL_malloc(
         commandBuffer->usedComputePipelineCapacity * sizeof(VulkanComputePipeline *));
 
     commandBuffer->usedFramebufferCapacity = 4;
     commandBuffer->usedFramebufferCount = 0;
+    SDL_zero(commandBuffer->usedFramebufferSet);
     commandBuffer->usedFramebuffers = SDL_malloc(
         commandBuffer->usedFramebufferCapacity * sizeof(VulkanFramebuffer *));
 
@@ -10712,41 +10742,49 @@ static void VULKAN_INTERNAL_CleanCommandBuffer(
         (void)SDL_AtomicDecRef(&commandBuffer->usedBuffers[i]->referenceCount);
     }
     commandBuffer->usedBufferCount = 0;
+    GPUResourceSet_Clear(&commandBuffer->usedBufferSet);
 
     for (Sint32 i = 0; i < commandBuffer->buffersUsedInPendingTransfersCount; i += 1) {
         (void)SDL_AtomicDecRef(&commandBuffer->buffersUsedInPendingTransfers[i]->usedRegion->allocation->referenceCount);
     }
     commandBuffer->buffersUsedInPendingTransfersCount = 0;
+    GPUResourceSet_Clear(&commandBuffer->buffersUsedInPendingTransfersSet);
 
     for (Sint32 i = 0; i < commandBuffer->usedTextureCount; i += 1) {
         (void)SDL_AtomicDecRef(&commandBuffer->usedTextures[i]->referenceCount);
     }
     commandBuffer->usedTextureCount = 0;
+    GPUResourceSet_Clear(&commandBuffer->usedTextureSet);
 
     for (Sint32 i = 0; i < commandBuffer->texturesUsedInPendingTransfersCount; i += 1){
         (void)SDL_AtomicDecRef(&commandBuffer->texturesUsedInPendingTransfers[i]->usedRegion->allocation->referenceCount);
     }
     commandBuffer->texturesUsedInPendingTransfersCount = 0;
+    GPUResourceSet_Clear(&commandBuffer->texturesUsedInPendingTransfersSet);
 
     for (Sint32 i = 0; i < commandBuffer->usedSamplerCount; i += 1) {
         (void)SDL_AtomicDecRef(&commandBuffer->usedSamplers[i]->referenceCount);
     }
     commandBuffer->usedSamplerCount = 0;
+    GPUResourceSet_Clear(&commandBuffer->usedSamplerSet);
 
     for (Sint32 i = 0; i < commandBuffer->usedGraphicsPipelineCount; i += 1) {
         (void)SDL_AtomicDecRef(&commandBuffer->usedGraphicsPipelines[i]->referenceCount);
     }
     commandBuffer->usedGraphicsPipelineCount = 0;
+    GPUResourceSet_Clear(&commandBuffer->usedGraphicsPipelineSet);
 
     for (Sint32 i = 0; i < commandBuffer->usedComputePipelineCount; i += 1) {
         (void)SDL_AtomicDecRef(&commandBuffer->usedComputePipelines[i]->referenceCount);
     }
     commandBuffer->usedComputePipelineCount = 0;
+    GPUResourceSet_Clear(&commandBuffer->usedComputePipelineSet);
 
     for (Sint32 i = 0; i < commandBuffer->usedFramebufferCount; i += 1) {
         (void)SDL_AtomicDecRef(&commandBuffer->usedFramebuffers[i]->referenceCount);
     }
     commandBuffer->usedFramebufferCount = 0;
+    GPUResourceSet_Clear(&commandBuffer->usedFramebufferSet);
 
     // Reset presentation data
 

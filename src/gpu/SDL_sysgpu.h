@@ -152,6 +152,73 @@ typedef struct BlitPipelineCacheEntry
 #define SDL_GPU_SWAPCHAINCOMPOSITION_MAX_ENUM_VALUE (SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084 + 1)
 #define SDL_GPU_PRESENTMODE_MAX_ENUM_VALUE          (SDL_GPU_PRESENTMODE_MAILBOX + 1)
 
+/* The resources a command buffer has tracked, kept beside its list of them so that tracking
+ * one already tracked takes constant time instead of a scan of the list. Zero-initialized is
+ * empty. */
+typedef struct GPUResourceSet
+{
+    const void **slots; // NULL marks an empty slot
+    Uint32 capacity;    // zero or a power of two
+    Uint32 count;
+} GPUResourceSet;
+
+static inline Uint32 GPUResourceSet_Slot(const void *resource, Uint32 mask)
+{
+    return (Uint32)(((Uint64)(uintptr_t)resource * 0x9E3779B97F4A7C15ULL) >> 32) & mask;
+}
+
+/* Returns true when the set already holds `resource`; otherwise adds it and returns false.
+ * When the set cannot grow it returns false without adding it, so the caller tracks the
+ * resource again, which is harmless. */
+static inline bool GPUResourceSet_Insert(GPUResourceSet *set, const void *resource)
+{
+    if ((set->count + 1) * 2 > set->capacity) {
+        const Uint32 capacity = set->capacity > 0 ? set->capacity * 2 : 64;
+        const void **slots = (const void **)SDL_calloc(capacity, sizeof(const void *));
+        if (!slots) {
+            return false;
+        }
+        for (Uint32 i = 0; i < set->capacity; i += 1) {
+            if (set->slots[i]) {
+                Uint32 slot = GPUResourceSet_Slot(set->slots[i], capacity - 1);
+                while (slots[slot]) {
+                    slot = (slot + 1) & (capacity - 1);
+                }
+                slots[slot] = set->slots[i];
+            }
+        }
+        SDL_free((void *)set->slots);
+        set->slots = slots;
+        set->capacity = capacity;
+    }
+    const Uint32 mask = set->capacity - 1;
+    for (Uint32 slot = GPUResourceSet_Slot(resource, mask);; slot = (slot + 1) & mask) {
+        if (set->slots[slot] == resource) {
+            return true;
+        }
+        if (!set->slots[slot]) {
+            set->slots[slot] = resource;
+            set->count += 1;
+            return false;
+        }
+    }
+}
+
+// Empties the set, keeping its slots for the next recording.
+static inline void GPUResourceSet_Clear(GPUResourceSet *set)
+{
+    if (set->count > 0) {
+        SDL_memset((void *)set->slots, 0, set->capacity * sizeof(const void *));
+        set->count = 0;
+    }
+}
+
+static inline void GPUResourceSet_Destroy(GPUResourceSet *set)
+{
+    SDL_free((void *)set->slots);
+    SDL_zerop(set);
+}
+
 static inline Sint32 Texture_GetBlockWidth(
     SDL_GPUTextureFormat format)
 {

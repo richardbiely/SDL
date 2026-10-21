@@ -34,14 +34,10 @@
 #define WINDOW_PROPERTY_DATA           "SDL.internal.gpu.metal.data"
 #define SDL_GPU_SHADERSTAGE_COMPUTE    2
 
-#define TRACK_RESOURCE(resource, type, array, count, capacity)   \
+#define TRACK_RESOURCE(resource, type, array, count, capacity, set) \
     do {                                                         \
-        Uint32 i;                                                \
-                                                                 \
-        for (i = 0; i < commandBuffer->count; i += 1) {          \
-            if (commandBuffer->array[i] == (resource)) {         \
-                return;                                          \
-            }                                                    \
+        if (GPUResourceSet_Insert(&commandBuffer->set, resource)) { \
+            return;                                              \
         }                                                        \
                                                                  \
         if (commandBuffer->count == commandBuffer->capacity) {   \
@@ -629,10 +625,12 @@ typedef struct MetalCommandBuffer
     MetalBuffer **usedBuffers;
     Uint32 usedBufferCount;
     Uint32 usedBufferCapacity;
+    GPUResourceSet usedBufferSet;
 
     MetalTexture **usedTextures;
     Uint32 usedTextureCount;
     Uint32 usedTextureCapacity;
+    GPUResourceSet usedTextureSet;
 
     // Timestamp Queries; pendingTimestampWrite.pool is NULL when the next pass is not timed
     MetalTimestampWrite pendingTimestampWrite;
@@ -759,7 +757,9 @@ static void METAL_DestroyDevice(SDL_GPUDevice *device)
     for (Uint32 i = 0; i < renderer->availableCommandBufferCount; i += 1) {
         MetalCommandBuffer *commandBuffer = renderer->availableCommandBuffers[i];
         SDL_free(commandBuffer->usedBuffers);
+        GPUResourceSet_Destroy(&commandBuffer->usedBufferSet);
         SDL_free(commandBuffer->usedTextures);
+        GPUResourceSet_Destroy(&commandBuffer->usedTextureSet);
         SDL_free(commandBuffer->usedUniformBuffers);
         SDL_free(commandBuffer->windowDatas);
         SDL_free(commandBuffer->timestampWrites);
@@ -810,7 +810,8 @@ static void METAL_INTERNAL_TrackBuffer(
         MetalBuffer *,
         usedBuffers,
         usedBufferCount,
-        usedBufferCapacity);
+        usedBufferCapacity,
+        usedBufferSet);
 }
 
 static void METAL_INTERNAL_TrackTexture(
@@ -822,7 +823,8 @@ static void METAL_INTERNAL_TrackTexture(
         MetalTexture *,
         usedTextures,
         usedTextureCount,
-        usedTextureCapacity);
+        usedTextureCapacity,
+        usedTextureSet);
 }
 
 // Native interop
@@ -3723,11 +3725,13 @@ static void METAL_INTERNAL_CleanCommandBuffer(
         (void)SDL_AtomicDecRef(&commandBuffer->usedBuffers[i]->referenceCount);
     }
     commandBuffer->usedBufferCount = 0;
+    GPUResourceSet_Clear(&commandBuffer->usedBufferSet);
 
     for (i = 0; i < commandBuffer->usedTextureCount; i += 1) {
         (void)SDL_AtomicDecRef(&commandBuffer->usedTextures[i]->referenceCount);
     }
     commandBuffer->usedTextureCount = 0;
+    GPUResourceSet_Clear(&commandBuffer->usedTextureSet);
 
     // Reset presentation
     commandBuffer->windowDataCount = 0;

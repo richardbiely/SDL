@@ -1002,7 +1002,6 @@ struct D3D12CommandBuffer
     ID3D12CommandAllocator *commandAllocator;
     ID3D12GraphicsCommandList *graphicsCommandList;
     D3D12Fence *inFlightFence;
-    bool autoReleaseFence;
 
     // Presentation data
     D3D12PresentData *presentDatas;
@@ -7572,7 +7571,6 @@ static SDL_GPUCommandBuffer *D3D12_AcquireCommandBuffer(
     SDL_zeroa(commandBuffer->computeReadWriteStorageBuffers);
     SDL_zeroa(commandBuffer->computeUniformBuffers);
 
-    commandBuffer->autoReleaseFence = true;
 
     return (SDL_GPUCommandBuffer *)commandBuffer;
 }
@@ -7936,8 +7934,9 @@ static bool D3D12_INTERNAL_CleanCommandBuffer(
     // Reset presentation
     commandBuffer->presentDataCount = 0;
 
-    // The fence is now available (unless SubmitAndAcquireFence was called)
-    if (commandBuffer->autoReleaseFence) {
+    // The command buffer keeps its own reference until the GPU has finished it, so a fence that
+    // the caller of SDL_SubmitGPUCommandBufferAndAcquireFence released early is not reused meanwhile.
+    if (commandBuffer->inFlightFence != NULL) {
         D3D12_ReleaseFence(
             (SDL_GPURenderer *)renderer,
             (SDL_GPUFence *)commandBuffer->inFlightFence);
@@ -8058,7 +8057,9 @@ static bool D3D12_INTERNAL_Submit(
 
     // Return the fence while submitLock is held, another thread could
     // recycle this command buffer as soon as the lock is released.
+    // The caller of SDL_SubmitGPUCommandBufferAndAcquireFence holds a reference of its own.
     if (fence) {
+        (void)SDL_AtomicIncRef(&d3d12CommandBuffer->inFlightFence->referenceCount);
         *fence = (SDL_GPUFence *)d3d12CommandBuffer->inFlightFence;
     }
 
@@ -8169,9 +8170,7 @@ static bool D3D12_Submit(
 static SDL_GPUFence *D3D12_SubmitAndAcquireFence(
     SDL_GPUCommandBuffer *commandBuffer)
 {
-    D3D12CommandBuffer *d3d12CommandBuffer = (D3D12CommandBuffer *)commandBuffer;
     SDL_GPUFence *fence = NULL;
-    d3d12CommandBuffer->autoReleaseFence = false;
     if (!D3D12_INTERNAL_Submit(commandBuffer, &fence)) {
         return NULL;
     }
@@ -8193,7 +8192,6 @@ static bool D3D12_Cancel(
 #endif
     CHECK_D3D12_ERROR_AND_RETURN("Failed to close command list!", false);
 
-    d3d12CommandBuffer->autoReleaseFence = false;
     SDL_LockMutex(renderer->submitLock);
     result = D3D12_INTERNAL_CleanCommandBuffer(renderer, d3d12CommandBuffer, true);
     SDL_UnlockMutex(renderer->submitLock);

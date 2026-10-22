@@ -5041,6 +5041,28 @@ static void D3D12_INTERNAL_SetGPUDescriptorHeaps(D3D12CommandBuffer *commandBuff
         heaps);
 }
 
+/* A draw or dispatch must take all of its descriptor tables from the heaps the command list has
+ * bound, so room for every descriptor it may write is made before it writes the first one: when
+ * either heap lacks it, fresh heaps replace both. Tables set from the earlier heaps are then no
+ * longer valid, so a true result means the caller writes all of its tables again. */
+static bool D3D12_INTERNAL_ReserveGPUDescriptors(
+    D3D12CommandBuffer *commandBuffer,
+    Uint32 viewCount,
+    Uint32 samplerCount)
+{
+    D3D12DescriptorHeap *viewHeap = commandBuffer->gpuDescriptorHeaps[D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV];
+    D3D12DescriptorHeap *samplerHeap = commandBuffer->gpuDescriptorHeaps[D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER];
+
+    if (viewHeap != NULL &&
+        viewHeap->currentDescriptorIndex + viewCount <= viewHeap->maxDescriptors &&
+        samplerHeap->currentDescriptorIndex + samplerCount <= samplerHeap->maxDescriptors) {
+        return false;
+    }
+
+    D3D12_INTERNAL_SetGPUDescriptorHeaps(commandBuffer);
+    return true;
+}
+
 static void D3D12_INTERNAL_WriteGPUDescriptors(
     D3D12CommandBuffer *commandBuffer,
     D3D12_DESCRIPTOR_HEAP_TYPE heapType,
@@ -5051,14 +5073,10 @@ static void D3D12_INTERNAL_WriteGPUDescriptors(
     D3D12DescriptorHeap *heap;
     D3D12_CPU_DESCRIPTOR_HANDLE gpuHeapCpuHandle;
 
-    /* Descriptor overflow, acquire new heaps */
-    if (commandBuffer->gpuDescriptorHeaps[heapType]->currentDescriptorIndex >= commandBuffer->gpuDescriptorHeaps[heapType]->maxDescriptors) {
-        D3D12_INTERNAL_SetGPUDescriptorHeaps(commandBuffer);
-    }
-
     heap = commandBuffer->gpuDescriptorHeaps[heapType];
 
-    // FIXME: need to error on overflow
+    // D3D12_INTERNAL_ReserveGPUDescriptors made room for the table.
+    SDL_assert(heap->currentDescriptorIndex + resourceHandleCount <= heap->maxDescriptors);
     gpuHeapCpuHandle.ptr = heap->descriptorHeapCPUStart.ptr + (heap->currentDescriptorIndex * heap->descriptorSize);
     gpuBaseDescriptor->ptr = heap->descriptorHeapGPUStart.ptr + (heap->currentDescriptorIndex * heap->descriptorSize);
 
@@ -5084,9 +5102,21 @@ static void D3D12_INTERNAL_BindGraphicsResources(
 {
     D3D12GraphicsPipeline *graphicsPipeline = commandBuffer->currentGraphicsPipeline;
 
-    /* Acquire GPU descriptor heaps if we haven't yet */
-    if (commandBuffer->gpuDescriptorHeaps[0] == NULL) {
-        D3D12_INTERNAL_SetGPUDescriptorHeaps(commandBuffer);
+    if (D3D12_INTERNAL_ReserveGPUDescriptors(
+            commandBuffer,
+            graphicsPipeline->header.num_vertex_samplers +
+                graphicsPipeline->header.num_vertex_storage_textures +
+                graphicsPipeline->header.num_vertex_storage_buffers +
+                graphicsPipeline->header.num_fragment_samplers +
+                graphicsPipeline->header.num_fragment_storage_textures +
+                graphicsPipeline->header.num_fragment_storage_buffers,
+            graphicsPipeline->header.num_vertex_samplers + graphicsPipeline->header.num_fragment_samplers)) {
+        commandBuffer->needVertexSamplerBind = true;
+        commandBuffer->needVertexStorageTextureBind = true;
+        commandBuffer->needVertexStorageBufferBind = true;
+        commandBuffer->needFragmentSamplerBind = true;
+        commandBuffer->needFragmentStorageTextureBind = true;
+        commandBuffer->needFragmentStorageBufferBind = true;
     }
 
     D3D12_CPU_DESCRIPTOR_HANDLE cpuHandles[MAX_TEXTURE_SAMPLERS_PER_STAGE];
@@ -5516,20 +5546,70 @@ static void D3D12_BeginComputePass(
     }
 }
 
+/* The read-write tables of a compute pass, which every dispatch of its pipeline uses. */
+static void D3D12_INTERNAL_BindComputeReadWriteResources(
+    D3D12CommandBuffer *commandBuffer)
+{
+    D3D12ComputePipeline *pipeline = commandBuffer->currentComputePipeline;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandles[MAX_TEXTURE_SAMPLERS_PER_STAGE];
+    D3D12_GPU_DESCRIPTOR_HANDLE gpuDescriptorHandle;
+
+    if (pipeline->header.numReadWriteStorageTextures > 0) {
+        for (Uint32 i = 0; i < pipeline->header.numReadWriteStorageTextures; i += 1) {
+            cpuHandles[i] = commandBuffer->computeReadWriteStorageTextureDescriptorHandles[i];
+        }
+
+        D3D12_INTERNAL_WriteGPUDescriptors(
+            commandBuffer,
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+            cpuHandles,
+            commandBuffer->computeReadWriteStorageTextureSubresourceCount,
+            &gpuDescriptorHandle);
+
+        ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(
+            commandBuffer->graphicsCommandList,
+            pipeline->rootSignature->readWriteStorageTextureRootIndex,
+            gpuDescriptorHandle);
+    }
+
+    if (pipeline->header.numReadWriteStorageBuffers > 0) {
+        for (Uint32 i = 0; i < pipeline->header.numReadWriteStorageBuffers; i += 1) {
+            cpuHandles[i] = commandBuffer->computeReadWriteStorageBufferDescriptorHandles[i];
+        }
+
+        D3D12_INTERNAL_WriteGPUDescriptors(
+            commandBuffer,
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+            cpuHandles,
+            commandBuffer->computeReadWriteStorageBufferCount,
+            &gpuDescriptorHandle);
+
+        ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(
+            commandBuffer->graphicsCommandList,
+            pipeline->rootSignature->readWriteStorageBufferRootIndex,
+            gpuDescriptorHandle);
+    }
+}
+
+/* The view descriptors a dispatch of the current compute pipeline may write. */
+static Uint32 D3D12_INTERNAL_ComputeViewDescriptorCount(
+    D3D12CommandBuffer *commandBuffer)
+{
+    D3D12ComputePipeline *pipeline = commandBuffer->currentComputePipeline;
+
+    return commandBuffer->computeReadWriteStorageTextureSubresourceCount +
+           commandBuffer->computeReadWriteStorageBufferCount +
+           pipeline->header.numSamplers +
+           pipeline->header.numReadonlyStorageTextures +
+           pipeline->header.numReadonlyStorageBuffers;
+}
+
 static void D3D12_BindComputePipeline(
     SDL_GPUCommandBuffer *commandBuffer,
     SDL_GPUComputePipeline *computePipeline)
 {
     D3D12CommandBuffer *d3d12CommandBuffer = (D3D12CommandBuffer *)commandBuffer;
-
-    /* Acquire GPU descriptor heaps if we haven't yet */
-    if (d3d12CommandBuffer->gpuDescriptorHeaps[0] == NULL) {
-        D3D12_INTERNAL_SetGPUDescriptorHeaps(d3d12CommandBuffer);
-    }
-
     D3D12ComputePipeline *pipeline = (D3D12ComputePipeline *)computePipeline;
-    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandles[MAX_TEXTURE_SAMPLERS_PER_STAGE];
-    D3D12_GPU_DESCRIPTOR_HANDLE gpuDescriptorHandle;
 
     ID3D12GraphicsCommandList_SetPipelineState(
         d3d12CommandBuffer->graphicsCommandList,
@@ -5558,42 +5638,13 @@ static void D3D12_BindComputePipeline(
 
     D3D12_INTERNAL_TrackComputePipeline(d3d12CommandBuffer, pipeline);
 
+    D3D12_INTERNAL_ReserveGPUDescriptors(
+        d3d12CommandBuffer,
+        D3D12_INTERNAL_ComputeViewDescriptorCount(d3d12CommandBuffer),
+        pipeline->header.numSamplers);
+
     // Bind write-only resources after setting root signature
-    if (pipeline->header.numReadWriteStorageTextures > 0) {
-        for (Uint32 i = 0; i < pipeline->header.numReadWriteStorageTextures; i += 1) {
-            cpuHandles[i] = d3d12CommandBuffer->computeReadWriteStorageTextureDescriptorHandles[i];
-        }
-
-        D3D12_INTERNAL_WriteGPUDescriptors(
-            d3d12CommandBuffer,
-            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-            cpuHandles,
-            d3d12CommandBuffer->computeReadWriteStorageTextureSubresourceCount,
-            &gpuDescriptorHandle);
-
-        ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(
-            d3d12CommandBuffer->graphicsCommandList,
-            d3d12CommandBuffer->currentComputePipeline->rootSignature->readWriteStorageTextureRootIndex,
-            gpuDescriptorHandle);
-    }
-
-    if (pipeline->header.numReadWriteStorageBuffers > 0) {
-        for (Uint32 i = 0; i < pipeline->header.numReadWriteStorageBuffers; i += 1) {
-            cpuHandles[i] = d3d12CommandBuffer->computeReadWriteStorageBufferDescriptorHandles[i];
-        }
-
-        D3D12_INTERNAL_WriteGPUDescriptors(
-            d3d12CommandBuffer,
-            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-            cpuHandles,
-            d3d12CommandBuffer->computeReadWriteStorageBufferCount,
-            &gpuDescriptorHandle);
-
-        ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(
-            d3d12CommandBuffer->graphicsCommandList,
-            d3d12CommandBuffer->currentComputePipeline->rootSignature->readWriteStorageBufferRootIndex,
-            gpuDescriptorHandle);
-    }
+    D3D12_INTERNAL_BindComputeReadWriteResources(d3d12CommandBuffer);
 }
 
 static void D3D12_BindComputeSamplers(
@@ -5724,9 +5775,14 @@ static void D3D12_INTERNAL_BindComputeResources(
 {
     D3D12ComputePipeline *computePipeline = commandBuffer->currentComputePipeline;
 
-    /* Acquire GPU descriptor heaps if we haven't yet */
-    if (commandBuffer->gpuDescriptorHeaps[0] == NULL) {
-        D3D12_INTERNAL_SetGPUDescriptorHeaps(commandBuffer);
+    if (D3D12_INTERNAL_ReserveGPUDescriptors(
+            commandBuffer,
+            D3D12_INTERNAL_ComputeViewDescriptorCount(commandBuffer),
+            computePipeline->header.numSamplers)) {
+        D3D12_INTERNAL_BindComputeReadWriteResources(commandBuffer);
+        commandBuffer->needComputeSamplerBind = true;
+        commandBuffer->needComputeReadOnlyStorageTextureBind = true;
+        commandBuffer->needComputeReadOnlyStorageBufferBind = true;
     }
 
     D3D12_CPU_DESCRIPTOR_HANDLE cpuHandles[MAX_TEXTURE_SAMPLERS_PER_STAGE];

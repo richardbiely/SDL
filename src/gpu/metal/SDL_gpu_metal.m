@@ -659,8 +659,6 @@ struct MetalRenderer
     id<MTLCommandQueue> queue;
 
     bool debugMode;
-    // Apple GPUs keep transient textures in tile memory
-    bool memorylessTextures;
     SDL_PropertiesID props;
     Uint32 allowedFramesInFlight;
 
@@ -1513,12 +1511,6 @@ static MetalTexture *METAL_INTERNAL_CreateTexture(
             ? createinfo->layer_count_or_depth
             : 1;
     textureDescriptor.storageMode = MTLStorageModePrivate;
-    if (renderer->memorylessTextures &&
-        SDL_GetBooleanProperty(createinfo->props, SDL_PROP_GPU_TEXTURE_CREATE_TRANSIENT_BOOLEAN, false)) {
-        if (@available(macOS 11.0, iOS 10.0, tvOS 10.0, *)) {
-            textureDescriptor.storageMode = MTLStorageModeMemoryless;
-        }
-    }
 
     textureDescriptor.usage = 0;
     if (createinfo->usage & (SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
@@ -4907,10 +4899,6 @@ static SDL_GPUDevice *METAL_CreateDevice(bool debugMode, bool preferLowPower, SD
         renderer->props = SDL_CreateProperties();
         SDL_SetPointerProperty(renderer->props, SDL_PROP_GPU_DEVICE_METAL_DEVICE_POINTER, (__bridge void *)renderer->device);
         SDL_SetPointerProperty(renderer->props, SDL_PROP_GPU_DEVICE_METAL_COMMAND_QUEUE_POINTER, (__bridge void *)renderer->queue);
-        if (@available(macOS 11.0, iOS 13.0, tvOS 13.0, *)) {
-            renderer->memorylessTextures = [device supportsFamily:MTLGPUFamilyApple1];
-        }
-        SDL_SetBooleanProperty(renderer->props, SDL_PROP_GPU_DEVICE_TRANSIENT_TEXTURES_BOOLEAN, renderer->memorylessTextures);
         if (verboseLogs) {
             SDL_LogInfo(SDL_LOG_CATEGORY_GPU, "SDL_GPU Driver: Metal");
         }

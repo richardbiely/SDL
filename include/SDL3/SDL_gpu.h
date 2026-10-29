@@ -2619,11 +2619,6 @@ extern SDL_DECLSPEC SDL_GPUShaderFormat SDLCALL SDL_GetGPUShaderFormats(SDL_GPUD
  *   command buffers are created from.
  *
  * The objects belong to SDL and stay valid until SDL_DestroyGPUDevice().
- *
- * `SDL_PROP_GPU_DEVICE_TRANSIENT_TEXTURES_BOOLEAN`: true when a texture
- * created with `SDL_PROP_GPU_TEXTURE_CREATE_TRANSIENT_BOOLEAN` takes no
- * memory. Only the Metal backend on an Apple GPU sets it; elsewhere such a
- * texture is an ordinary one.
  */
 extern SDL_DECLSPEC SDL_PropertiesID SDLCALL SDL_GetGPUDeviceProperties(SDL_GPUDevice *device);
 
@@ -2681,7 +2676,6 @@ extern SDL_DECLSPEC void * SDLCALL SDL_GetGPUTextureNativeHandle(
 #define SDL_PROP_GPU_DEVICE_DRIVER_INFO_STRING        "SDL.gpu.device.driver_info"
 #define SDL_PROP_GPU_DEVICE_METAL_DEVICE_POINTER        "SDL.gpu.device.metal.device"
 #define SDL_PROP_GPU_DEVICE_METAL_COMMAND_QUEUE_POINTER "SDL.gpu.device.metal.command_queue"
-#define SDL_PROP_GPU_DEVICE_TRANSIENT_TEXTURES_BOOLEAN  "SDL.gpu.device.transient_textures"
 
 
 /* State Creation */
@@ -2907,16 +2901,6 @@ extern SDL_DECLSPEC SDL_GPUShader * SDLCALL SDL_CreateGPUShader(
  *   clear the texture to a stencil of this Uint8 value. Defaults to zero.
  * - `SDL_PROP_GPU_TEXTURE_CREATE_NAME_STRING`: a name that can be displayed
  *   in debugging tools.
- * - `SDL_PROP_GPU_TEXTURE_CREATE_TRANSIENT_BOOLEAN`: true for a render target
- *   whose contents live only within a render pass: every pass clears it or
- *   does not care what it held, and stores it only by resolving it. Where
- *   SDL_GetGPUDeviceProperties() reports
- *   `SDL_PROP_GPU_DEVICE_TRANSIENT_TEXTURES_BOOLEAN`, such a texture takes no
- *   memory (Metal keeps it in tile memory); elsewhere it is an ordinary
- *   texture. It must be a 2D texture whose usage is COLOR_TARGET or
- *   DEPTH_STENCIL_TARGET alone, it cannot be a resolve texture, and it
- *   cannot be loaded, stored, copied, uploaded to, downloaded or blitted to.
- *   Defaults to false.
  *
  * \param device a GPU Context.
  * \param createinfo a struct describing the state of the texture to create.
@@ -2949,7 +2933,6 @@ extern SDL_DECLSPEC SDL_GPUTexture * SDLCALL SDL_CreateGPUTexture(
 #define SDL_PROP_GPU_TEXTURE_CREATE_D3D12_CLEAR_DEPTH_FLOAT     "SDL.gpu.texture.create.d3d12.clear.depth"
 #define SDL_PROP_GPU_TEXTURE_CREATE_D3D12_CLEAR_STENCIL_NUMBER  "SDL.gpu.texture.create.d3d12.clear.stencil"
 #define SDL_PROP_GPU_TEXTURE_CREATE_NAME_STRING                 "SDL.gpu.texture.create.name"
-#define SDL_PROP_GPU_TEXTURE_CREATE_TRANSIENT_BOOLEAN           "SDL.gpu.texture.create.transient"
 
 /**
  * Creates a buffer object to be used in graphics or compute workflows.

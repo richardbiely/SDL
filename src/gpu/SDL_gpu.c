@@ -593,6 +593,12 @@ static void SDL_GPU_CheckComputeBindings(SDL_GPUComputePass *compute_pass)
     }
 }
 
+static bool SDL_GPU_IsTransientTexture(SDL_GPUTexture *texture)
+{
+    return texture != NULL &&
+           SDL_GetBooleanProperty(((TextureCommonHeader *)texture)->info.props, SDL_PROP_GPU_TEXTURE_CREATE_TRANSIENT_BOOLEAN, false);
+}
+
 // Driver Functions
 
 #ifndef SDL_GPU_DISABLED
@@ -1322,6 +1328,17 @@ SDL_GPUTexture *SDL_CreateGPUTexture(
             SDL_assert_release(!"For any texture: usage cannot contain SAMPLER for textures with an integer format");
             failed = true;
         }
+        if (SDL_GetBooleanProperty(createinfo->props, SDL_PROP_GPU_TEXTURE_CREATE_TRANSIENT_BOOLEAN, false)) {
+            const SDL_GPUTextureUsageFlags targets = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
+            if (createinfo->type != SDL_GPU_TEXTURETYPE_2D) {
+                SDL_assert_release(!"For transient textures: type must be SDL_GPU_TEXTURETYPE_2D");
+                failed = true;
+            }
+            if (!(createinfo->usage & targets) || (createinfo->usage & ~targets)) {
+                SDL_assert_release(!"For transient textures: usage must be COLOR_TARGET or DEPTH_STENCIL_TARGET alone");
+                failed = true;
+            }
+        }
 
         if (createinfo->type == SDL_GPU_TEXTURETYPE_CUBE) {
             // Cubemap validation
@@ -1859,6 +1876,17 @@ SDL_GPURenderPass *SDL_BeginGPURenderPass(
                 return NULL;
             }
 
+            if (SDL_GPU_IsTransientTexture(color_target_infos[i].texture)) {
+                if (color_target_infos[i].load_op == SDL_GPU_LOADOP_LOAD) {
+                    SDL_assert_release(!"Cannot load a transient color target!");
+                    return NULL;
+                }
+                if (color_target_infos[i].store_op == SDL_GPU_STOREOP_STORE || color_target_infos[i].store_op == SDL_GPU_STOREOP_RESOLVE_AND_STORE) {
+                    SDL_assert_release(!"Cannot store a transient color target!");
+                    return NULL;
+                }
+            }
+
             if (color_target_infos[i].store_op == SDL_GPU_STOREOP_RESOLVE || color_target_infos[i].store_op == SDL_GPU_STOREOP_RESOLVE_AND_STORE) {
                 if (color_target_infos[i].resolve_texture == NULL) {
                     SDL_assert_release(!"Store op is RESOLVE or RESOLVE_AND_STORE but resolve_texture is NULL!");
@@ -1883,6 +1911,10 @@ SDL_GPURenderPass *SDL_BeginGPURenderPass(
                     }
                     if (!(resolveTextureHeader->info.usage & SDL_GPU_TEXTUREUSAGE_COLOR_TARGET)) {
                         SDL_assert_release(!"Resolve texture usage must include COLOR_TARGET!");
+                        return NULL;
+                    }
+                    if (SDL_GPU_IsTransientTexture(color_target_infos[i].resolve_texture)) {
+                        SDL_assert_release(!"Resolve texture cannot be transient!");
                         return NULL;
                     }
                 }
@@ -1922,6 +1954,20 @@ SDL_GPURenderPass *SDL_BeginGPURenderPass(
                 depth_stencil_target_info->stencil_store_op == SDL_GPU_STOREOP_RESOLVE_AND_STORE) {
                 SDL_assert_release(!"RESOLVE store ops are not supported for depth-stencil targets!");
                 return NULL;
+            }
+
+            if (SDL_GPU_IsTransientTexture(depth_stencil_target_info->texture)) {
+                const bool stencil = IsStencilFormat(textureHeader->info.format);
+                if (depth_stencil_target_info->load_op == SDL_GPU_LOADOP_LOAD ||
+                    (stencil && depth_stencil_target_info->stencil_load_op == SDL_GPU_LOADOP_LOAD)) {
+                    SDL_assert_release(!"Cannot load a transient depth-stencil target!");
+                    return NULL;
+                }
+                if (depth_stencil_target_info->store_op == SDL_GPU_STOREOP_STORE ||
+                    (stencil && depth_stencil_target_info->stencil_store_op == SDL_GPU_STOREOP_STORE)) {
+                    SDL_assert_release(!"Cannot store a transient depth-stencil target!");
+                    return NULL;
+                }
             }
         }
     }
@@ -2887,6 +2933,10 @@ void SDL_UploadToGPUTexture(
             SDL_assert_release(!"Destination texture cannot be NULL!");
             return;
         }
+        if (SDL_GPU_IsTransientTexture(destination->texture)) {
+            SDL_assert_release(!"Cannot upload to a transient texture!");
+            return;
+        }
     }
 
     COPYPASS_DEVICE->UploadToTexture(
@@ -2973,6 +3023,10 @@ void SDL_CopyGPUTextureToTexture(
             SDL_assert_release(!"Source and destination textures must have the same format!");
             return;
         }
+        if (SDL_GPU_IsTransientTexture(source->texture) || SDL_GPU_IsTransientTexture(destination->texture)) {
+            SDL_assert_release(!"Cannot copy a transient texture!");
+            return;
+        }
     }
 
     COPYPASS_DEVICE->CopyTextureToTexture(
@@ -3051,6 +3105,10 @@ void SDL_DownloadFromGPUTexture(
         }
         if (destination->transfer_buffer == NULL) {
             SDL_assert_release(!"Destination transfer buffer cannot be NULL!");
+            return;
+        }
+        if (SDL_GPU_IsTransientTexture(source->texture)) {
+            SDL_assert_release(!"Cannot download a transient texture!");
             return;
         }
     }
@@ -3199,6 +3257,10 @@ void SDL_BlitGPUTexture(
         }
         if ((dstHeader->info.usage & SDL_GPU_TEXTUREUSAGE_COLOR_TARGET) == 0) {
             SDL_assert_release(!"Blit destination texture must be created with the COLOR_TARGET usage flag");
+            failed = true;
+        }
+        if (SDL_GPU_IsTransientTexture(info->destination.texture)) {
+            SDL_assert_release(!"Blit destination texture cannot be transient");
             failed = true;
         }
         if (IsDepthFormat(srcHeader->info.format)) {

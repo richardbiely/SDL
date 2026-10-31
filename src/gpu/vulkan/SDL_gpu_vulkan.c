@@ -10991,7 +10991,9 @@ static bool VULKAN_INTERNAL_Submit(
     Uint32 swapchainImageIndex;
     VulkanTextureSubresource *swapchainTextureSubresource;
     VulkanMemorySubAllocator *allocator;
-    bool performCleanups =
+    // Defragmenting records copies into this command buffer, so it happens once a frame: on the
+    // submission that requested a swapchain texture, or on every submission without a window.
+    bool defragment =
         (renderer->claimedWindowCount > 0 && vulkanCommandBuffer->swapchainRequested) ||
         renderer->claimedWindowCount == 0;
 
@@ -11016,7 +11018,7 @@ static bool VULKAN_INTERNAL_Submit(
             swapchainTextureSubresource);
     }
 
-    if (performCleanups &&
+    if (defragment &&
         renderer->allocationsToDefragCount > 0 &&
         !renderer->defragInProgress) {
         if (!VULKAN_INTERNAL_DefragmentMemory(renderer, vulkanCommandBuffer))
@@ -11117,43 +11119,46 @@ static bool VULKAN_INTERNAL_Submit(
         *acquiredFence = vulkanCommandBuffer->inFlightFence;
     }
 
-    if (performCleanups) {
-        for (Sint32 i = renderer->submittedCommandBufferCount - 1; i >= 0; i -= 1) {
-            vulkanResult = renderer->vkGetFenceStatus(
-                renderer->logicalDevice,
-                renderer->submittedCommandBuffers[i]->inFlightFence->fence);
+    // Clean up finished work on every submission, as the D3D12 and Metal backends do: finished
+    // command buffers return their fences to the pool, and the transfer buffers and memory they
+    // held are freed. Off-screen submissions made while a window is claimed (texture creation,
+    // uploads before the first frame) would otherwise keep all of it until a frame's submission,
+    // and the device's destruction then frees every fence the pool grew to.
+    for (Sint32 i = renderer->submittedCommandBufferCount - 1; i >= 0; i -= 1) {
+        vulkanResult = renderer->vkGetFenceStatus(
+            renderer->logicalDevice,
+            renderer->submittedCommandBuffers[i]->inFlightFence->fence);
 
-            if (vulkanResult == VK_SUCCESS) {
-                VULKAN_INTERNAL_CleanCommandBuffer(
-                    renderer,
-                    renderer->submittedCommandBuffers[i],
-                    false);
-            }
+        if (vulkanResult == VK_SUCCESS) {
+            VULKAN_INTERNAL_CleanCommandBuffer(
+                renderer,
+                renderer->submittedCommandBuffers[i],
+                false);
         }
+    }
 
-        if (renderer->checkEmptyAllocations) {
-            SDL_LockMutex(renderer->allocatorLock);
+    if (renderer->checkEmptyAllocations) {
+        SDL_LockMutex(renderer->allocatorLock);
 
-            for (Uint32 i = 0; i < VK_MAX_MEMORY_TYPES; i += 1) {
-                allocator = &renderer->memoryAllocator->subAllocators[i];
+        for (Uint32 i = 0; i < VK_MAX_MEMORY_TYPES; i += 1) {
+            allocator = &renderer->memoryAllocator->subAllocators[i];
 
-                for (Sint32 j = allocator->allocationCount - 1; j >= 0; j -= 1) {
-                    if (allocator->allocations[j]->usedRegionCount == 0) {
-                        VULKAN_INTERNAL_DeallocateMemory(
-                            renderer,
-                            allocator,
-                            j);
-                    }
+            for (Sint32 j = allocator->allocationCount - 1; j >= 0; j -= 1) {
+                if (allocator->allocations[j]->usedRegionCount == 0) {
+                    VULKAN_INTERNAL_DeallocateMemory(
+                        renderer,
+                        allocator,
+                        j);
                 }
             }
-
-            renderer->checkEmptyAllocations = false;
-
-            SDL_UnlockMutex(renderer->allocatorLock);
         }
 
-        VULKAN_INTERNAL_PerformPendingDestroys(renderer);
+        renderer->checkEmptyAllocations = false;
+
+        SDL_UnlockMutex(renderer->allocatorLock);
     }
+
+    VULKAN_INTERNAL_PerformPendingDestroys(renderer);
 
     // Mark command buffer as submitted
     VULKAN_INTERNAL_ReleaseCommandBuffer(vulkanCommandBuffer);

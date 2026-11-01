@@ -2397,6 +2397,16 @@ extern SDL_DECLSPEC SDL_GPUDevice * SDLCALL SDL_CreateGPUDevice(
  *   in the same directory as the exe; Microsoft strongly advises against
  *   this!
  *
+ * - `SDL_PROP_GPU_DEVICE_CREATE_PIPELINE_CACHE_FILE_STRING`: a file the
+ *   device's pipeline cache loads from when the device is created and saves to
+ *   when it is destroyed, so pipelines a run compiled before load from it
+ *   instead of compiling again. A missing file, or one another GPU or driver
+ *   version wrote, gives an empty cache, which a successful destroy writes
+ *   over it; the device writes a new file beside it and renames it over the
+ *   file, so a run reading it meanwhile reads one whole cache. The directory
+ *   must exist. Only the Vulkan backend has a pipeline cache today; the others
+ *   ignore this property.
+ *
  * With the Vulkan backend:
  *
  * - `SDL_PROP_GPU_DEVICE_CREATE_VULKAN_REQUIRE_HARDWARE_ACCELERATION_BOOLEAN`:
@@ -2438,6 +2448,7 @@ extern SDL_DECLSPEC SDL_GPUDevice * SDLCALL SDL_CreateGPUDeviceWithProperties(
 #define SDL_PROP_GPU_DEVICE_CREATE_PREFERLOWPOWER_BOOLEAN                       "SDL.gpu.device.create.preferlowpower"
 #define SDL_PROP_GPU_DEVICE_CREATE_VERBOSE_BOOLEAN                              "SDL.gpu.device.create.verbose"
 #define SDL_PROP_GPU_DEVICE_CREATE_NAME_STRING                                  "SDL.gpu.device.create.name"
+#define SDL_PROP_GPU_DEVICE_CREATE_PIPELINE_CACHE_FILE_STRING                   "SDL.gpu.device.create.pipelinecache.file"
 #define SDL_PROP_GPU_DEVICE_CREATE_FEATURE_CLIP_DISTANCE_BOOLEAN                "SDL.gpu.device.create.feature.clip_distance"
 #define SDL_PROP_GPU_DEVICE_CREATE_FEATURE_DEPTH_CLAMPING_BOOLEAN               "SDL.gpu.device.create.feature.depth_clamping"
 #define SDL_PROP_GPU_DEVICE_CREATE_FEATURE_INDIRECT_DRAW_FIRST_INSTANCE_BOOLEAN "SDL.gpu.device.create.feature.indirect_draw_first_instance"

@@ -1276,6 +1276,10 @@ SDL3_0.0.0 {
     SDL_WriteGPUPassTimestamps;
     SDL_GetGPUTimestampQueryResults;
     SDL_GetGPUTimestampCalibration;
+    SDL_CreateGPUTilePipeline;
+    SDL_ReleaseGPUTilePipeline;
+    SDL_PushGPUTileUniformData;
+    SDL_DispatchGPUTilePipeline;
     SDL_GetGPUCommandBufferNativeHandle;
     SDL_GetGPUTextureNativeHandle;
     # extra symbols go here (don't modify this line)

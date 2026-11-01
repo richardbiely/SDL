@@ -112,6 +112,14 @@ typedef struct GraphicsPipelineCommonHeader
     Uint32 num_fragment_uniform_buffers;
 } GraphicsPipelineCommonHeader;
 
+typedef struct TilePipelineCommonHeader
+{
+    SDL_GPUTextureFormat color_target_formats[MAX_COLOR_TARGET_BINDINGS];
+    Uint32 num_color_targets;
+    SDL_GPUSampleCount sample_count;
+    Uint32 num_uniform_buffers;
+} TilePipelineCommonHeader;
+
 typedef struct ComputePipelineCommonHeader
 {
     Uint32 numSamplers;
@@ -1175,6 +1183,26 @@ struct SDL_GPUDevice
         SDL_GPUTimestampQueryPool *pool,
         Uint64 *gpuTimestamp,
         float *nanosecondsPerTick);
+
+    // Tile Pipelines (CityZens extension; NULL when unsupported)
+
+    SDL_GPUTilePipeline *(*CreateTilePipeline)(
+        SDL_GPURenderer *driverData,
+        const SDL_GPUTilePipelineCreateInfo *createinfo);
+
+    void (*ReleaseTilePipeline)(
+        SDL_GPURenderer *driverData,
+        SDL_GPUTilePipeline *tilePipeline);
+
+    void (*PushTileUniformData)(
+        SDL_GPUCommandBuffer *commandBuffer,
+        Uint32 slotIndex,
+        const void *data,
+        Uint32 length);
+
+    void (*DispatchTilePipeline)(
+        SDL_GPUCommandBuffer *commandBuffer,
+        SDL_GPUTilePipeline *tilePipeline);
 
     // Feature Queries
 

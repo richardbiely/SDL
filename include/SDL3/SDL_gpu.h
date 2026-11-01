@@ -612,6 +612,21 @@ typedef struct SDL_GPUFence SDL_GPUFence;
 typedef struct SDL_GPUTimestampQueryPool SDL_GPUTimestampQueryPool;
 
 /**
+ * An opaque handle representing a tile pipeline.
+ *
+ * A tile pipeline runs a kernel once per tile inside a render pass, reading
+ * and writing the pass's color targets at every pixel and sample of the tile
+ * while they are still in tile memory. This is a CityZens extension of SDL
+ * GPU; it is not part of upstream SDL.
+ *
+ * \sa SDL_CreateGPUTilePipeline
+ * \sa SDL_PushGPUTileUniformData
+ * \sa SDL_DispatchGPUTilePipeline
+ * \sa SDL_ReleaseGPUTilePipeline
+ */
+typedef struct SDL_GPUTilePipeline SDL_GPUTilePipeline;
+
+/**
  * The value of a timestamp the GPU did not sample although its pass
  * completed. Metal does not sample passes that do no work on the GPU.
  *
@@ -2010,6 +2025,29 @@ typedef struct SDL_GPUComputePipelineCreateInfo
 } SDL_GPUComputePipelineCreateInfo;
 
 /**
+ * A structure specifying the parameters of a tile pipeline.
+ *
+ * The kernel reads and writes the render pass's color targets through the
+ * implicit imageblock, so its color formats and sample count must match the
+ * pass it is dispatched in. A CityZens extension of SDL GPU.
+ *
+ * \sa SDL_CreateGPUTilePipeline
+ */
+typedef struct SDL_GPUTilePipelineCreateInfo
+{
+    size_t code_size;                                   /**< The size in bytes of the tile kernel code pointed to. */
+    const Uint8 *code;                                  /**< A pointer to tile kernel code: MSL source or a metallib. */
+    const char *entrypoint;                             /**< A pointer to a null-terminated UTF-8 string specifying the entry point function name for the kernel. */
+    SDL_GPUShaderFormat format;                         /**< The format of the tile kernel code: SDL_GPU_SHADERFORMAT_MSL or SDL_GPU_SHADERFORMAT_METALLIB. */
+    const SDL_GPUTextureFormat *color_target_formats;   /**< The formats of the render pass's color targets, in order. */
+    Uint32 num_color_targets;                           /**< The number of color target formats. */
+    SDL_GPUSampleCount sample_count;                    /**< The sample count of the render pass's color targets. */
+    Uint32 num_uniform_buffers;                         /**< The number of uniform buffers the kernel reads, at buffer indices 0 to num_uniform_buffers - 1. */
+
+    SDL_PropertiesID props;                             /**< A properties ID for extensions. Should be 0 if no extensions are needed. */
+} SDL_GPUTilePipelineCreateInfo;
+
+/**
  * A structure specifying the parameters of a color target used by a render
  * pass.
  *
@@ -2625,6 +2663,10 @@ extern SDL_DECLSPEC SDL_GPUShaderFormat SDLCALL SDL_GetGPUShaderFormats(SDL_GPUD
  * framebuffer fetches (MSL `[[color(n)]]` fragment inputs). Only the Metal
  * backend on an Apple GPU sets it; elsewhere a shader must read a target's
  * contents from a copy, sampled in a later pass.
+ *
+ * `SDL_PROP_GPU_DEVICE_TILE_PIPELINES_BOOLEAN`: true when the device runs
+ * tile pipelines (SDL_CreateGPUTilePipeline). Only the Metal backend on an
+ * Apple GPU sets it.
  */
 extern SDL_DECLSPEC SDL_PropertiesID SDLCALL SDL_GetGPUDeviceProperties(SDL_GPUDevice *device);
 
@@ -2683,6 +2725,7 @@ extern SDL_DECLSPEC void * SDLCALL SDL_GetGPUTextureNativeHandle(
 #define SDL_PROP_GPU_DEVICE_METAL_DEVICE_POINTER        "SDL.gpu.device.metal.device"
 #define SDL_PROP_GPU_DEVICE_METAL_COMMAND_QUEUE_POINTER "SDL.gpu.device.metal.command_queue"
 #define SDL_PROP_GPU_DEVICE_FRAMEBUFFER_FETCH_BOOLEAN   "SDL.gpu.device.framebuffer_fetch"
+#define SDL_PROP_GPU_DEVICE_TILE_PIPELINES_BOOLEAN      "SDL.gpu.device.tile_pipelines"
 
 
 /* State Creation */
@@ -4695,6 +4738,82 @@ extern SDL_DECLSPEC bool SDLCALL SDL_GetGPUTimestampCalibration(
     SDL_GPUTimestampQueryPool *pool,
     Uint64 *gpu_timestamp,
     float *nanoseconds_per_tick);
+
+/* Tile Pipelines (CityZens extension) */
+
+/**
+ * Creates a tile pipeline.
+ *
+ * A tile kernel takes the implicit imageblock: per pixel and sample, the
+ * render pass's color targets as they stand. In MSL that is an
+ * `imageblock<T, imageblock_layout_implicit>` argument of a `kernel`
+ * function, and uniform buffer n is `[[buffer(n)]]`. Only devices that report
+ * SDL_PROP_GPU_DEVICE_TILE_PIPELINES_BOOLEAN create one; others fail with
+ * SDL_Unsupported().
+ *
+ * \param device a GPU context.
+ * \param createinfo a struct describing the state of the tile pipeline to
+ *                   create.
+ * \returns a tile pipeline object on success, or NULL on failure; call
+ *          SDL_GetError() for more information.
+ *
+ * \sa SDL_DispatchGPUTilePipeline
+ * \sa SDL_ReleaseGPUTilePipeline
+ */
+extern SDL_DECLSPEC SDL_GPUTilePipeline * SDLCALL SDL_CreateGPUTilePipeline(
+    SDL_GPUDevice *device,
+    const SDL_GPUTilePipelineCreateInfo *createinfo);
+
+/**
+ * Frees the given tile pipeline as soon as it is safe to do so.
+ *
+ * You must not reference the tile pipeline after calling this function.
+ *
+ * \param device a GPU context.
+ * \param tile_pipeline a tile pipeline to be destroyed.
+ *
+ * \sa SDL_CreateGPUTilePipeline
+ */
+extern SDL_DECLSPEC void SDLCALL SDL_ReleaseGPUTilePipeline(
+    SDL_GPUDevice *device,
+    SDL_GPUTilePipeline *tile_pipeline);
+
+/**
+ * Pushes data to a tile kernel uniform slot on the command buffer.
+ *
+ * Subsequent tile dispatches in this command buffer read this data, as
+ * SDL_PushGPUFragmentUniformData does for draws.
+ *
+ * \param command_buffer a command buffer.
+ * \param slot_index the tile kernel uniform slot to push data to.
+ * \param data client data to write.
+ * \param length the length of the data to write.
+ *
+ * \sa SDL_DispatchGPUTilePipeline
+ */
+extern SDL_DECLSPEC void SDLCALL SDL_PushGPUTileUniformData(
+    SDL_GPUCommandBuffer *command_buffer,
+    Uint32 slot_index,
+    const void *data,
+    Uint32 length);
+
+/**
+ * Runs a tile pipeline once per tile of the render pass.
+ *
+ * The kernel sees what the pass's earlier draws left in its color targets,
+ * and the pass's later draws and its store or resolve see what the kernel
+ * wrote. The dispatch replaces the pass's graphics pipeline: bind one again
+ * with SDL_BindGPUGraphicsPipeline before the next draw.
+ *
+ * \param render_pass a render pass handle.
+ * \param tile_pipeline the tile pipeline to dispatch, made for the pass's
+ *                      color target formats and sample count.
+ *
+ * \sa SDL_CreateGPUTilePipeline
+ */
+extern SDL_DECLSPEC void SDLCALL SDL_DispatchGPUTilePipeline(
+    SDL_GPURenderPass *render_pass,
+    SDL_GPUTilePipeline *tile_pipeline);
 
 /* Format Info */
 

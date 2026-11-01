@@ -33,6 +33,7 @@
 #define METAL_FIRST_VERTEX_BUFFER_SLOT 14
 #define WINDOW_PROPERTY_DATA           "SDL.internal.gpu.metal.data"
 #define SDL_GPU_SHADERSTAGE_COMPUTE    2
+#define SDL_GPU_SHADERSTAGE_TILE       3
 
 #define TRACK_RESOURCE(resource, type, array, count, capacity, set) \
     do {                                                         \
@@ -509,6 +510,13 @@ typedef struct MetalGraphicsPipeline
     id<MTLDepthStencilState> depth_stencil_state;
 } MetalGraphicsPipeline;
 
+typedef struct MetalTilePipeline
+{
+    TilePipelineCommonHeader header;
+
+    id<MTLRenderPipelineState> handle;
+} MetalTilePipeline;
+
 typedef struct MetalComputePipeline
 {
     ComputePipelineCommonHeader header;
@@ -614,6 +622,8 @@ typedef struct MetalCommandBuffer
     id<MTLBuffer> computeReadWriteBuffers[MAX_COMPUTE_WRITE_BUFFERS];
     MetalUniformBuffer *computeUniformBuffers[MAX_UNIFORM_BUFFERS_PER_STAGE];
 
+    MetalUniformBuffer *tileUniformBuffers[MAX_UNIFORM_BUFFERS_PER_STAGE];
+
     MetalUniformBuffer **usedUniformBuffers;
     Uint32 usedUniformBufferCount;
     Uint32 usedUniformBufferCapacity;
@@ -659,6 +669,7 @@ struct MetalRenderer
     id<MTLCommandQueue> queue;
 
     bool debugMode;
+    bool supportsTilePipelines;
     SDL_PropertiesID props;
     Uint32 allowedFramesInFlight;
 
@@ -1138,6 +1149,69 @@ static SDL_GPUComputePipeline *METAL_CreateComputePipeline(
         pipeline->threadcountZ = createinfo->threadcount_z;
 
         return (SDL_GPUComputePipeline *)pipeline;
+    }
+}
+
+static SDL_GPUTilePipeline *METAL_CreateTilePipeline(
+    SDL_GPURenderer *driverData,
+    const SDL_GPUTilePipelineCreateInfo *createinfo)
+{
+    @autoreleasepool {
+        MetalRenderer *renderer = (MetalRenderer *)driverData;
+        MetalLibraryFunction libraryFunction;
+        id<MTLRenderPipelineState> handle;
+        MetalTilePipeline *pipeline;
+        NSError *error = nil;
+
+        if (@available(macOS 11.0, iOS 11.0, tvOS 14.5, *)) {
+            libraryFunction = METAL_INTERNAL_CompileShader(
+                renderer,
+                createinfo->format,
+                createinfo->code,
+                createinfo->code_size,
+                createinfo->entrypoint);
+
+            if (libraryFunction.library == nil || libraryFunction.function == nil) {
+                return NULL;
+            }
+
+            MTLTileRenderPipelineDescriptor *descriptor = [MTLTileRenderPipelineDescriptor new];
+            descriptor.tileFunction = libraryFunction.function;
+            descriptor.rasterSampleCount = SDLToMetal_SampleCount[createinfo->sample_count];
+            descriptor.threadgroupSizeMatchesTileSize = YES;
+            for (Uint32 i = 0; i < createinfo->num_color_targets; i += 1) {
+                descriptor.colorAttachments[i].pixelFormat = SDLToMetal_TextureFormat(createinfo->color_target_formats[i]);
+            }
+
+            handle = [renderer->device newRenderPipelineStateWithTileDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&error];
+            if (handle == nil) {
+                SET_ERROR_AND_RETURN("Creating tile pipeline failed: %s", [[error description] UTF8String], NULL);
+            }
+
+            pipeline = SDL_calloc(1, sizeof(MetalTilePipeline));
+            pipeline->handle = handle;
+            for (Uint32 i = 0; i < createinfo->num_color_targets; i += 1) {
+                pipeline->header.color_target_formats[i] = createinfo->color_target_formats[i];
+            }
+            pipeline->header.num_color_targets = createinfo->num_color_targets;
+            pipeline->header.sample_count = createinfo->sample_count;
+            pipeline->header.num_uniform_buffers = createinfo->num_uniform_buffers;
+
+            return (SDL_GPUTilePipeline *)pipeline;
+        }
+        SDL_Unsupported();
+        return NULL;
+    }
+}
+
+static void METAL_ReleaseTilePipeline(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTilePipeline *tilePipeline)
+{
+    @autoreleasepool {
+        MetalTilePipeline *metalTilePipeline = (MetalTilePipeline *)tilePipeline;
+        metalTilePipeline->handle = nil;
+        SDL_free(metalTilePipeline);
     }
 }
 
@@ -2410,6 +2484,7 @@ static SDL_GPUCommandBuffer *METAL_AcquireCommandBuffer(
             commandBuffer->vertexUniformBuffers[i] = NULL;
             commandBuffer->fragmentUniformBuffers[i] = NULL;
             commandBuffer->computeUniformBuffers[i] = NULL;
+            commandBuffer->tileUniformBuffers[i] = NULL;
         }
 
         SDL_UnlockMutex(renderer->acquireCommandBufferLock);
@@ -3262,6 +3337,12 @@ static void METAL_INTERNAL_PushUniformData(
                 metalCommandBuffer);
         }
         metalUniformBuffer = metalCommandBuffer->computeUniformBuffers[slotIndex];
+    } else if (shaderStage == SDL_GPU_SHADERSTAGE_TILE) {
+        if (metalCommandBuffer->tileUniformBuffers[slotIndex] == NULL) {
+            metalCommandBuffer->tileUniformBuffers[slotIndex] = METAL_INTERNAL_AcquireUniformBufferFromPool(
+                metalCommandBuffer);
+        }
+        metalUniformBuffer = metalCommandBuffer->tileUniformBuffers[slotIndex];
     } else {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Unrecognized shader stage!");
         return;
@@ -3284,6 +3365,8 @@ static void METAL_INTERNAL_PushUniformData(
             metalCommandBuffer->fragmentUniformBuffers[slotIndex] = metalUniformBuffer;
         } else if (shaderStage == SDL_GPU_SHADERSTAGE_COMPUTE) {
             metalCommandBuffer->computeUniformBuffers[slotIndex] = metalUniformBuffer;
+        } else if (shaderStage == SDL_GPU_SHADERSTAGE_TILE) {
+            metalCommandBuffer->tileUniformBuffers[slotIndex] = metalUniformBuffer;
         } else {
             SDL_LogError(SDL_LOG_CATEGORY_GPU, "Unrecognized shader stage!");
             return;
@@ -3305,6 +3388,8 @@ static void METAL_INTERNAL_PushUniformData(
         metalCommandBuffer->needFragmentUniformBufferBind[slotIndex] = true;
     } else if (shaderStage == SDL_GPU_SHADERSTAGE_COMPUTE) {
         metalCommandBuffer->needComputeUniformBufferBind[slotIndex] = true;
+    } else if (shaderStage == SDL_GPU_SHADERSTAGE_TILE) {
+        // A tile dispatch binds its uniform buffers itself.
     } else {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Unrecognized shader stage!");
     }
@@ -3339,6 +3424,50 @@ static void METAL_PushFragmentUniformData(
             slotIndex,
             data,
             length);
+    }
+}
+
+static void METAL_PushTileUniformData(
+    SDL_GPUCommandBuffer *commandBuffer,
+    Uint32 slotIndex,
+    const void *data,
+    Uint32 length)
+{
+    @autoreleasepool {
+        METAL_INTERNAL_PushUniformData(
+            (MetalCommandBuffer *)commandBuffer,
+            SDL_GPU_SHADERSTAGE_TILE,
+            slotIndex,
+            data,
+            length);
+    }
+}
+
+static void METAL_DispatchTilePipeline(
+    SDL_GPUCommandBuffer *commandBuffer,
+    SDL_GPUTilePipeline *tilePipeline)
+{
+    @autoreleasepool {
+        MetalCommandBuffer *metalCommandBuffer = (MetalCommandBuffer *)commandBuffer;
+        MetalTilePipeline *pipeline = (MetalTilePipeline *)tilePipeline;
+
+        if (@available(macOS 11.0, iOS 11.0, tvOS 14.5, *)) {
+            id<MTLRenderCommandEncoder> encoder = metalCommandBuffer->renderEncoder;
+            [encoder setRenderPipelineState:pipeline->handle];
+            for (Uint32 i = 0; i < pipeline->header.num_uniform_buffers; i += 1) {
+                if (metalCommandBuffer->tileUniformBuffers[i] == NULL) {
+                    metalCommandBuffer->tileUniformBuffers[i] = METAL_INTERNAL_AcquireUniformBufferFromPool(
+                        metalCommandBuffer);
+                }
+                [encoder setTileBuffer:metalCommandBuffer->tileUniformBuffers[i]->handle
+                                offset:metalCommandBuffer->tileUniformBuffers[i]->drawOffset
+                               atIndex:i];
+            }
+            [encoder dispatchThreadsPerTile:MTLSizeMake(encoder.tileWidth, encoder.tileHeight, 1)];
+        }
+
+        // The encoder now holds the tile pipeline: the next draw binds a graphics pipeline again.
+        metalCommandBuffer->graphics_pipeline = NULL;
     }
 }
 
@@ -4900,6 +5029,11 @@ static SDL_GPUDevice *METAL_CreateDevice(bool debugMode, bool preferLowPower, SD
         SDL_SetPointerProperty(renderer->props, SDL_PROP_GPU_DEVICE_METAL_COMMAND_QUEUE_POINTER, (__bridge void *)renderer->queue);
         // Every Apple GPU reads the pass's own color targets in a fragment function.
         SDL_SetBooleanProperty(renderer->props, SDL_PROP_GPU_DEVICE_FRAMEBUFFER_FETCH_BOOLEAN, [device supportsFamily:MTLGPUFamilyApple1]);
+        // Tile functions run on Apple4 (A11) and later.
+        if (@available(macOS 11.0, iOS 11.0, tvOS 14.5, *)) {
+            renderer->supportsTilePipelines = [device supportsFamily:MTLGPUFamilyApple4];
+        }
+        SDL_SetBooleanProperty(renderer->props, SDL_PROP_GPU_DEVICE_TILE_PIPELINES_BOOLEAN, renderer->supportsTilePipelines);
         if (verboseLogs) {
             SDL_LogInfo(SDL_LOG_CATEGORY_GPU, "SDL_GPU Driver: Metal");
         }
@@ -4984,6 +5118,12 @@ static SDL_GPUDevice *METAL_CreateDevice(bool debugMode, bool preferLowPower, SD
         result->GetTimestampCalibration = METAL_GetTimestampCalibration;
         result->GetCommandBufferNativeHandle = METAL_GetCommandBufferNativeHandle;
         result->GetTextureNativeHandle = METAL_GetTextureNativeHandle;
+        if (renderer->supportsTilePipelines) {
+            result->CreateTilePipeline = METAL_CreateTilePipeline;
+            result->ReleaseTilePipeline = METAL_ReleaseTilePipeline;
+            result->PushTileUniformData = METAL_PushTileUniformData;
+            result->DispatchTilePipeline = METAL_DispatchTilePipeline;
+        }
         result->driverData = (SDL_GPURenderer *)renderer;
         result->shader_formats = SDL_GPU_SHADERFORMAT_MSL | SDL_GPU_SHADERFORMAT_METALLIB;
         renderer->sdlGPUDevice = result;

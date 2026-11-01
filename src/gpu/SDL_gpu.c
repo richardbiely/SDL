@@ -3708,6 +3708,145 @@ bool SDL_GetGPUTimestampCalibration(
         nanoseconds_per_tick);
 }
 
+// Tile Pipelines (CityZens extension)
+
+SDL_GPUTilePipeline *SDL_CreateGPUTilePipeline(
+    SDL_GPUDevice *device,
+    const SDL_GPUTilePipelineCreateInfo *createinfo)
+{
+    CHECK_DEVICE_MAGIC(device, NULL);
+
+    CHECK_PARAM(createinfo == NULL) {
+        SDL_InvalidParamError("createinfo");
+        return NULL;
+    }
+
+    if (device->CreateTilePipeline == NULL) {
+        SDL_Unsupported();
+        return NULL;
+    }
+
+    if (device->debug_mode) {
+        if (!(createinfo->format & (SDL_GPU_SHADERFORMAT_MSL | SDL_GPU_SHADERFORMAT_METALLIB))) {
+            SDL_assert_release(!"A tile kernel must be MSL or a metallib!");
+            return NULL;
+        }
+        if (createinfo->num_color_targets == 0 || createinfo->num_color_targets > MAX_COLOR_TARGET_BINDINGS) {
+            SDL_assert_release(!"Tile pipeline color target count must be between 1 and MAX_COLOR_TARGET_BINDINGS!");
+            return NULL;
+        }
+        if (createinfo->color_target_formats == NULL) {
+            SDL_assert_release(!"Tile pipeline color target formats cannot be NULL!");
+            return NULL;
+        }
+        if (createinfo->num_uniform_buffers > MAX_UNIFORM_BUFFERS_PER_STAGE) {
+            SDL_assert_release(!"Tile pipeline uniform buffer count cannot exceed MAX_UNIFORM_BUFFERS_PER_STAGE!");
+            return NULL;
+        }
+    }
+
+    return device->CreateTilePipeline(
+        device->driverData,
+        createinfo);
+}
+
+void SDL_ReleaseGPUTilePipeline(
+    SDL_GPUDevice *device,
+    SDL_GPUTilePipeline *tile_pipeline)
+{
+    CHECK_DEVICE_MAGIC(device, );
+
+    CHECK_PARAM(tile_pipeline == NULL) {
+        return;
+    }
+
+    device->ReleaseTilePipeline(
+        device->driverData,
+        tile_pipeline);
+}
+
+void SDL_PushGPUTileUniformData(
+    SDL_GPUCommandBuffer *command_buffer,
+    Uint32 slot_index,
+    const void *data,
+    Uint32 length)
+{
+    CHECK_PARAM(command_buffer == NULL) {
+        SDL_InvalidParamError("command_buffer");
+        return;
+    }
+    CHECK_PARAM(data == NULL) {
+        SDL_InvalidParamError("data");
+        return;
+    }
+    CHECK_PARAM(slot_index >= MAX_UNIFORM_BUFFERS_PER_STAGE) {
+        SDL_SetError("slot_index exceeds MAX_UNIFORM_BUFFERS_PER_STAGE");
+        return;
+    }
+
+    if (COMMAND_BUFFER_DEVICE->PushTileUniformData == NULL) {
+        SDL_Unsupported();
+        return;
+    }
+
+    if (COMMAND_BUFFER_DEVICE->debug_mode) {
+        CHECK_COMMAND_BUFFER
+    }
+
+    COMMAND_BUFFER_DEVICE->PushTileUniformData(
+        command_buffer,
+        slot_index,
+        data,
+        length);
+}
+
+void SDL_DispatchGPUTilePipeline(
+    SDL_GPURenderPass *render_pass,
+    SDL_GPUTilePipeline *tile_pipeline)
+{
+    CHECK_PARAM(render_pass == NULL) {
+        SDL_InvalidParamError("render_pass");
+        return;
+    }
+    CHECK_PARAM(tile_pipeline == NULL) {
+        SDL_InvalidParamError("tile_pipeline");
+        return;
+    }
+
+    if (RENDERPASS_DEVICE->DispatchTilePipeline == NULL) {
+        SDL_Unsupported();
+        return;
+    }
+
+    if (RENDERPASS_DEVICE->debug_mode) {
+        CHECK_RENDERPASS
+
+        // The kernel's imageblock is the pass's color targets, so they must match it.
+        const RenderPass *rp = (const RenderPass *)render_pass;
+        const TilePipelineCommonHeader *pipeline = (const TilePipelineCommonHeader *)tile_pipeline;
+        if (pipeline->num_color_targets != rp->num_color_targets) {
+            SDL_assert_release(!"Tile pipeline color target count does not match the render pass!");
+            return;
+        }
+        for (Uint32 i = 0; i < rp->num_color_targets; i += 1) {
+            const SDL_GPUTextureCreateInfo *info = &((TextureCommonHeader *)rp->color_targets[i])->info;
+            if (info->format != pipeline->color_target_formats[i] || info->sample_count != pipeline->sample_count) {
+                SDL_assert_release(!"Tile pipeline color target formats or sample count do not match the render pass!");
+                return;
+            }
+        }
+    }
+
+    RENDERPASS_DEVICE->DispatchTilePipeline(
+        RENDERPASS_COMMAND_BUFFER,
+        tile_pipeline);
+
+    // The dispatch replaced the pass's graphics pipeline; the next draw binds one again.
+    if (RENDERPASS_DEVICE->debug_mode) {
+        RENDERPASS_BOUND_PIPELINE = NULL;
+    }
+}
+
 Uint32 SDL_CalculateGPUTextureFormatSize(
     SDL_GPUTextureFormat format,
     Uint32 width,

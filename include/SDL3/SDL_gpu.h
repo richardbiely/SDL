@@ -2619,6 +2619,12 @@ extern SDL_DECLSPEC SDL_GPUShaderFormat SDLCALL SDL_GetGPUShaderFormats(SDL_GPUD
  *   command buffers are created from.
  *
  * The objects belong to SDL and stay valid until SDL_DestroyGPUDevice().
+ *
+ * `SDL_PROP_GPU_DEVICE_FRAMEBUFFER_FETCH_BOOLEAN`: true when a fragment shader
+ * may read the current render pass's own color targets at its pixel, as
+ * framebuffer fetches (MSL `[[color(n)]]` fragment inputs). Only the Metal
+ * backend on an Apple GPU sets it; elsewhere a shader must read a target's
+ * contents from a copy, sampled in a later pass.
  */
 extern SDL_DECLSPEC SDL_PropertiesID SDLCALL SDL_GetGPUDeviceProperties(SDL_GPUDevice *device);
 
@@ -2676,6 +2682,7 @@ extern SDL_DECLSPEC void * SDLCALL SDL_GetGPUTextureNativeHandle(
 #define SDL_PROP_GPU_DEVICE_DRIVER_INFO_STRING        "SDL.gpu.device.driver_info"
 #define SDL_PROP_GPU_DEVICE_METAL_DEVICE_POINTER        "SDL.gpu.device.metal.device"
 #define SDL_PROP_GPU_DEVICE_METAL_COMMAND_QUEUE_POINTER "SDL.gpu.device.metal.command_queue"
+#define SDL_PROP_GPU_DEVICE_FRAMEBUFFER_FETCH_BOOLEAN   "SDL.gpu.device.framebuffer_fetch"
 
 
 /* State Creation */

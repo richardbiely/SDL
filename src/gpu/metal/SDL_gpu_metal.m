@@ -4898,6 +4898,8 @@ static SDL_GPUDevice *METAL_CreateDevice(bool debugMode, bool preferLowPower, SD
         renderer->props = SDL_CreateProperties();
         SDL_SetPointerProperty(renderer->props, SDL_PROP_GPU_DEVICE_METAL_DEVICE_POINTER, (__bridge void *)renderer->device);
         SDL_SetPointerProperty(renderer->props, SDL_PROP_GPU_DEVICE_METAL_COMMAND_QUEUE_POINTER, (__bridge void *)renderer->queue);
+        // Every Apple GPU reads the pass's own color targets in a fragment function.
+        SDL_SetBooleanProperty(renderer->props, SDL_PROP_GPU_DEVICE_FRAMEBUFFER_FETCH_BOOLEAN, [device supportsFamily:MTLGPUFamilyApple1]);
         if (verboseLogs) {
             SDL_LogInfo(SDL_LOG_CATEGORY_GPU, "SDL_GPU Driver: Metal");
         }

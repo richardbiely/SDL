@@ -4657,8 +4657,9 @@ extern SDL_DECLSPEC void SDLCALL SDL_ReleaseGPUFence(
  * Creates a pool of GPU timestamp queries.
  *
  * Only the Metal backend on GPUs that sample counters at stage boundaries
- * (Apple silicon) and the Vulkan backend on queues with timestamp support
- * implement timestamp queries. Other devices fail with SDL_Unsupported().
+ * (Apple silicon), the Vulkan backend on queues with timestamp support and
+ * the D3D12 backend on queues with a timestamp frequency implement timestamp
+ * queries. Other devices fail with SDL_Unsupported().
  *
  * \param device a GPU context.
  * \param num_timestamps the number of timestamps in the pool. Metal allows
@@ -4735,7 +4736,8 @@ extern SDL_DECLSPEC bool SDLCALL SDL_GetGPUTimestampQueryResults(
  * Reads the GPU timestamp counter now, for aligning GPU and CPU timelines.
  *
  * On Vulkan this submits a command buffer and waits for it, so the value
- * lags the moment of the call by the submission latency.
+ * lags the moment of the call by the submission latency. D3D12 reads the
+ * queue's clock directly.
  *
  * \param device a GPU context.
  * \param pool a timestamp query pool of the device.

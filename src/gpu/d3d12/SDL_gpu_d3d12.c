@@ -173,6 +173,7 @@ static const IID D3D_IID_ID3D12Fence = { 0x0a753dcf, 0xc4d8, 0x4b91, { 0xad, 0xf
 static const IID D3D_IID_ID3D12RootSignature = { 0xc54a6b66, 0x72df, 0x4ee8, { 0x8b, 0xe5, 0xa9, 0x46, 0xa1, 0x42, 0x92, 0x14 } };
 static const IID D3D_IID_ID3D12CommandSignature = { 0xc36a797c, 0xec80, 0x4f0a, { 0x89, 0x85, 0xa7, 0xb2, 0x47, 0x50, 0x82, 0xd1 } };
 static const IID D3D_IID_ID3D12PipelineState = { 0x765a30f3, 0xf624, 0x4c6f, { 0xa8, 0x28, 0xac, 0xe9, 0x48, 0x62, 0x24, 0x45 } };
+static const IID D3D_IID_ID3D12QueryHeap = { 0x0d9658ae, 0xed45, 0x469e, { 0xa6, 0x1d, 0x97, 0x0e, 0xc5, 0x83, 0xca, 0xb4 } };
 static const IID D3D_IID_ID3D12Debug = { 0x344488b7, 0x6846, 0x474b, { 0xb9, 0x89, 0xf0, 0x27, 0x44, 0x82, 0x45, 0xe0 } };
 static const IID D3D_IID_ID3D12InfoQueue = { 0x0742a90b, 0xc387, 0x483f, { 0xb9, 0x46, 0x30, 0xa7, 0xe4, 0xe6, 0x14, 0x58 } };
 static const IID D3D_IID_ID3D12InfoQueue1 = { 0x2852dd88, 0xb484, 0x4c0c, { 0xb6, 0xb1, 0x67, 0x16, 0x85, 0x00, 0xe6, 0x00 } };
@@ -991,6 +992,25 @@ struct D3D12Renderer
     SDL_Mutex *disposeLock;
 };
 
+typedef struct D3D12TimestampQueryPool
+{
+    ID3D12QueryHeap *heap;
+    // Resolved timestamps, mapped for the life of the pool
+    ID3D12Resource *readback;
+    const Uint64 *values;
+    Uint32 count;
+    Uint64 frequency;
+    // Per timestamp: nonzero once the command buffer that writes it has completed
+    SDL_AtomicInt *written;
+} D3D12TimestampQueryPool;
+
+typedef struct D3D12TimestampWrite
+{
+    D3D12TimestampQueryPool *pool;
+    Uint32 beginIndex;
+    Uint32 endIndex;
+} D3D12TimestampWrite;
+
 struct D3D12CommandBuffer
 {
     // reserved for SDL_gpu
@@ -1002,6 +1022,13 @@ struct D3D12CommandBuffer
     ID3D12CommandAllocator *commandAllocator;
     ID3D12GraphicsCommandList *graphicsCommandList;
     D3D12Fence *inFlightFence;
+
+    // Timestamp Queries; a NULL pool means the next or current pass is not timed
+    D3D12TimestampWrite pendingTimestampWrite;
+    D3D12TimestampWrite activeTimestampWrite;
+    D3D12TimestampWrite *timestampWrites;
+    Uint32 timestampWriteCount;
+    Uint32 timestampWriteCapacity;
 
     // Presentation data
     D3D12PresentData *presentDatas;
@@ -1606,6 +1633,7 @@ static void D3D12_INTERNAL_DestroyCommandBuffer(D3D12CommandBuffer *commandBuffe
     SDL_free(commandBuffer->usedDescriptorHeaps);
     SDL_free(commandBuffer->usedUniformBuffers);
     SDL_free(commandBuffer->textureDownloads);
+    SDL_free(commandBuffer->timestampWrites);
     SDL_free(commandBuffer);
 }
 
@@ -4403,6 +4431,249 @@ static D3D12Buffer *D3D12_INTERNAL_PrepareBufferForWrite(
     return container->activeBuffer;
 }
 
+// Timestamp Queries
+
+static void D3D12_INTERNAL_BeginPassTimestamps(
+    D3D12CommandBuffer *commandBuffer)
+{
+    D3D12TimestampWrite timestampWrite = commandBuffer->pendingTimestampWrite;
+
+    if (timestampWrite.pool == NULL) {
+        return;
+    }
+    commandBuffer->pendingTimestampWrite.pool = NULL;
+
+    if (commandBuffer->timestampWriteCount >= commandBuffer->timestampWriteCapacity) {
+        const Uint32 capacity = SDL_max(commandBuffer->timestampWriteCapacity * 2, 16);
+        D3D12TimestampWrite *writes = (D3D12TimestampWrite *)SDL_realloc(
+            commandBuffer->timestampWrites,
+            sizeof(D3D12TimestampWrite) * capacity);
+        if (writes == NULL) {
+            return;
+        }
+        commandBuffer->timestampWrites = writes;
+        commandBuffer->timestampWriteCapacity = capacity;
+    }
+    commandBuffer->timestampWrites[commandBuffer->timestampWriteCount] = timestampWrite;
+    commandBuffer->timestampWriteCount += 1;
+
+    ID3D12GraphicsCommandList_EndQuery(
+        commandBuffer->graphicsCommandList,
+        timestampWrite.pool->heap,
+        D3D12_QUERY_TYPE_TIMESTAMP,
+        timestampWrite.beginIndex);
+    commandBuffer->activeTimestampWrite = timestampWrite;
+}
+
+static void D3D12_INTERNAL_ResolveTimestamp(
+    D3D12CommandBuffer *commandBuffer,
+    D3D12TimestampQueryPool *pool,
+    Uint32 index)
+{
+    ID3D12GraphicsCommandList_ResolveQueryData(
+        commandBuffer->graphicsCommandList,
+        pool->heap,
+        D3D12_QUERY_TYPE_TIMESTAMP,
+        index,
+        1,
+        pool->readback,
+        (UINT64)index * sizeof(Uint64));
+}
+
+static void D3D12_INTERNAL_EndPassTimestamps(
+    D3D12CommandBuffer *commandBuffer)
+{
+    D3D12TimestampWrite timestampWrite = commandBuffer->activeTimestampWrite;
+
+    if (timestampWrite.pool == NULL) {
+        return;
+    }
+    commandBuffer->activeTimestampWrite.pool = NULL;
+
+    ID3D12GraphicsCommandList_EndQuery(
+        commandBuffer->graphicsCommandList,
+        timestampWrite.pool->heap,
+        D3D12_QUERY_TYPE_TIMESTAMP,
+        timestampWrite.endIndex);
+    // The two indices need not be adjacent, so each resolves on its own
+    D3D12_INTERNAL_ResolveTimestamp(commandBuffer, timestampWrite.pool, timestampWrite.beginIndex);
+    D3D12_INTERNAL_ResolveTimestamp(commandBuffer, timestampWrite.pool, timestampWrite.endIndex);
+}
+
+static void D3D12_ReleaseTimestampQueryPool(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTimestampQueryPool *timestampQueryPool)
+{
+    D3D12TimestampQueryPool *pool = (D3D12TimestampQueryPool *)timestampQueryPool;
+
+    (void)D3D12_Wait(driverData);
+    if (pool->readback) {
+        if (pool->values) {
+            ID3D12Resource_Unmap(pool->readback, 0, NULL);
+        }
+        ID3D12Resource_Release(pool->readback);
+    }
+    if (pool->heap) {
+        ID3D12QueryHeap_Release(pool->heap);
+    }
+    SDL_free(pool->written);
+    SDL_free(pool);
+}
+
+static SDL_GPUTimestampQueryPool *D3D12_CreateTimestampQueryPool(
+    SDL_GPURenderer *driverData,
+    Uint32 numTimestamps)
+{
+    D3D12Renderer *renderer = (D3D12Renderer *)driverData;
+    D3D12_QUERY_HEAP_DESC heapDesc;
+    D3D12_HEAP_PROPERTIES heapProperties;
+    D3D12_RESOURCE_DESC desc;
+    UINT64 frequency = 0;
+    void *values = NULL;
+    HRESULT res;
+
+    res = ID3D12CommandQueue_GetTimestampFrequency(renderer->commandQueue, &frequency);
+    if (FAILED(res) || frequency == 0) {
+        SDL_Unsupported();
+        return NULL;
+    }
+
+    D3D12TimestampQueryPool *pool = (D3D12TimestampQueryPool *)SDL_calloc(1, sizeof(D3D12TimestampQueryPool));
+    if (pool == NULL) {
+        return NULL;
+    }
+    pool->count = numTimestamps;
+    pool->frequency = frequency;
+    pool->written = (SDL_AtomicInt *)SDL_calloc(numTimestamps, sizeof(SDL_AtomicInt));
+    if (pool->written == NULL) {
+        D3D12_ReleaseTimestampQueryPool(driverData, (SDL_GPUTimestampQueryPool *)pool);
+        return NULL;
+    }
+
+    SDL_zero(heapDesc);
+    heapDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    heapDesc.Count = numTimestamps;
+    res = ID3D12Device_CreateQueryHeap(
+        renderer->device,
+        &heapDesc,
+        D3D_GUID(D3D_IID_ID3D12QueryHeap),
+        (void **)&pool->heap);
+    if (FAILED(res)) {
+        D3D12_INTERNAL_SetError(renderer, "Could not create timestamp query heap!", res);
+        D3D12_ReleaseTimestampQueryPool(driverData, (SDL_GPUTimestampQueryPool *)pool);
+        return NULL;
+    }
+
+    SDL_zero(heapProperties);
+    heapProperties.Type = D3D12_HEAP_TYPE_READBACK;
+    heapProperties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+    heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+
+    SDL_zero(desc);
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+    desc.Width = (UINT64)numTimestamps * sizeof(Uint64);
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_UNKNOWN;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    res = ID3D12Device_CreateCommittedResource(
+        renderer->device,
+        &heapProperties,
+        D3D12_HEAP_FLAG_NONE,
+        &desc,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        NULL,
+        D3D_GUID(D3D_IID_ID3D12Resource),
+        (void **)&pool->readback);
+    if (FAILED(res)) {
+        D3D12_INTERNAL_SetError(renderer, "Could not create timestamp readback buffer!", res);
+        D3D12_ReleaseTimestampQueryPool(driverData, (SDL_GPUTimestampQueryPool *)pool);
+        return NULL;
+    }
+
+    // A readback buffer may stay mapped; reads happen only after the GPU has written
+    res = ID3D12Resource_Map(pool->readback, 0, NULL, &values);
+    if (FAILED(res)) {
+        D3D12_INTERNAL_SetError(renderer, "Could not map timestamp readback buffer!", res);
+        D3D12_ReleaseTimestampQueryPool(driverData, (SDL_GPUTimestampQueryPool *)pool);
+        return NULL;
+    }
+    pool->values = (const Uint64 *)values;
+
+    return (SDL_GPUTimestampQueryPool *)pool;
+}
+
+static bool D3D12_WritePassTimestamps(
+    SDL_GPUCommandBuffer *commandBuffer,
+    SDL_GPUTimestampQueryPool *timestampQueryPool,
+    Uint32 beginIndex,
+    Uint32 endIndex)
+{
+    D3D12CommandBuffer *d3d12CommandBuffer = (D3D12CommandBuffer *)commandBuffer;
+    D3D12TimestampQueryPool *pool = (D3D12TimestampQueryPool *)timestampQueryPool;
+
+    if (beginIndex >= pool->count || endIndex >= pool->count || beginIndex == endIndex) {
+        return SDL_SetError("Invalid timestamp indices %u and %u for a pool of %u", beginIndex, endIndex, pool->count);
+    }
+
+    SDL_SetAtomicInt(&pool->written[beginIndex], 0);
+    SDL_SetAtomicInt(&pool->written[endIndex], 0);
+    d3d12CommandBuffer->pendingTimestampWrite.pool = pool;
+    d3d12CommandBuffer->pendingTimestampWrite.beginIndex = beginIndex;
+    d3d12CommandBuffer->pendingTimestampWrite.endIndex = endIndex;
+    return true;
+}
+
+static bool D3D12_GetTimestampQueryResults(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTimestampQueryPool *timestampQueryPool,
+    Uint32 firstIndex,
+    Uint32 numTimestamps,
+    Uint64 *timestamps)
+{
+    D3D12TimestampQueryPool *pool = (D3D12TimestampQueryPool *)timestampQueryPool;
+    (void)driverData;
+
+    if (firstIndex >= pool->count || numTimestamps > pool->count - firstIndex) {
+        return SDL_SetError("Timestamp range %u+%u exceeds a pool of %u", firstIndex, numTimestamps, pool->count);
+    }
+
+    for (Uint32 i = 0; i < numTimestamps; i += 1) {
+        // The readback buffer holds a value only once its command buffer has completed
+        const bool written = SDL_GetAtomicInt(&pool->written[firstIndex + i]) != 0;
+        timestamps[i] = written ? pool->values[firstIndex + i] : 0;
+    }
+    return true;
+}
+
+static bool D3D12_GetTimestampCalibration(
+    SDL_GPURenderer *driverData,
+    SDL_GPUTimestampQueryPool *timestampQueryPool,
+    Uint64 *gpuTimestamp,
+    float *nanosecondsPerTick)
+{
+    D3D12Renderer *renderer = (D3D12Renderer *)driverData;
+    D3D12TimestampQueryPool *pool = (D3D12TimestampQueryPool *)timestampQueryPool;
+    UINT64 gpu = 0;
+    UINT64 cpu = 0;
+
+    // Reads the queue's clock directly, with no submission
+    const HRESULT res = ID3D12CommandQueue_GetClockCalibration(renderer->commandQueue, &gpu, &cpu);
+    if (FAILED(res)) {
+        D3D12_INTERNAL_SetError(renderer, "Could not read the GPU clock!", res);
+        return false;
+    }
+
+    *gpuTimestamp = gpu;
+    *nanosecondsPerTick = (float)(1000000000.0 / (double)pool->frequency);
+    return true;
+}
+
 static void D3D12_BeginRenderPass(
     SDL_GPUCommandBuffer *commandBuffer,
     const SDL_GPUColorTargetInfo *colorTargetInfos,
@@ -4410,6 +4681,8 @@ static void D3D12_BeginRenderPass(
     const SDL_GPUDepthStencilTargetInfo *depthStencilTargetInfo)
 {
     D3D12CommandBuffer *d3d12CommandBuffer = (D3D12CommandBuffer *)commandBuffer;
+
+    D3D12_INTERNAL_BeginPassTimestamps(d3d12CommandBuffer);
 
     Uint32 framebufferWidth = SDL_MAX_UINT32;
     Uint32 framebufferHeight = SDL_MAX_UINT32;
@@ -5485,6 +5758,8 @@ static void D3D12_EndRenderPass(
     SDL_zeroa(d3d12CommandBuffer->fragmentSamplerDescriptorHandles);
     SDL_zeroa(d3d12CommandBuffer->fragmentStorageTextureDescriptorHandles);
     SDL_zeroa(d3d12CommandBuffer->fragmentStorageBufferDescriptorHandles);
+
+    D3D12_INTERNAL_EndPassTimestamps(d3d12CommandBuffer);
 }
 
 // Compute Pass
@@ -5497,6 +5772,8 @@ static void D3D12_BeginComputePass(
     Uint32 numStorageBufferBindings)
 {
     D3D12CommandBuffer *d3d12CommandBuffer = (D3D12CommandBuffer *)commandBuffer;
+
+    D3D12_INTERNAL_BeginPassTimestamps(d3d12CommandBuffer);
 
     d3d12CommandBuffer->computeReadWriteStorageTextureSubresourceCount = numStorageTextureBindings;
     d3d12CommandBuffer->computeReadWriteStorageBufferCount = numStorageBufferBindings;
@@ -5975,6 +6252,8 @@ static void D3D12_EndComputePass(
     SDL_zeroa(d3d12CommandBuffer->computeReadWriteStorageBufferDescriptorHandles);
 
     d3d12CommandBuffer->currentComputePipeline = NULL;
+
+    D3D12_INTERNAL_EndPassTimestamps(d3d12CommandBuffer);
 }
 
 // TransferBuffer Data
@@ -6031,8 +6310,7 @@ static void D3D12_UnmapTransferBuffer(
 static void D3D12_BeginCopyPass(
     SDL_GPUCommandBuffer *commandBuffer)
 {
-    // no-op
-    (void)commandBuffer;
+    D3D12_INTERNAL_BeginPassTimestamps((D3D12CommandBuffer *)commandBuffer);
 }
 
 static void D3D12_UploadToTexture(
@@ -6570,8 +6848,7 @@ static void D3D12_DownloadFromBuffer(
 static void D3D12_EndCopyPass(
     SDL_GPUCommandBuffer *commandBuffer)
 {
-    // no-op
-    (void)commandBuffer;
+    D3D12_INTERNAL_EndPassTimestamps((D3D12CommandBuffer *)commandBuffer);
 }
 
 static void D3D12_GenerateMipmaps(
@@ -7923,6 +8200,18 @@ static bool D3D12_INTERNAL_CleanCommandBuffer(
         SDL_free(commandBuffer->textureDownloads[i]);
     }
     commandBuffer->textureDownloadCount = 0;
+
+    // Timestamps of a completed command buffer are now readable
+    for (i = 0; i < commandBuffer->timestampWriteCount; i += 1) {
+        D3D12TimestampWrite *timestampWrite = &commandBuffer->timestampWrites[i];
+        if (!cancel) {
+            SDL_SetAtomicInt(&timestampWrite->pool->written[timestampWrite->beginIndex], 1);
+            SDL_SetAtomicInt(&timestampWrite->pool->written[timestampWrite->endIndex], 1);
+        }
+    }
+    commandBuffer->timestampWriteCount = 0;
+    commandBuffer->pendingTimestampWrite.pool = NULL;
+    commandBuffer->activeTimestampWrite.pool = NULL;
 
     if (!result) {
         return false;
@@ -9708,6 +9997,11 @@ static SDL_GPUDevice *D3D12_CreateDevice(bool debugMode, bool preferLowPower, SD
     }
 
     ASSIGN_DRIVER(D3D12)
+    result->CreateTimestampQueryPool = D3D12_CreateTimestampQueryPool;
+    result->ReleaseTimestampQueryPool = D3D12_ReleaseTimestampQueryPool;
+    result->WritePassTimestamps = D3D12_WritePassTimestamps;
+    result->GetTimestampQueryResults = D3D12_GetTimestampQueryResults;
+    result->GetTimestampCalibration = D3D12_GetTimestampCalibration;
     result->driverData = (SDL_GPURenderer *)renderer;
     result->shader_formats = shaderFormats;
     result->debug_mode = debugMode;

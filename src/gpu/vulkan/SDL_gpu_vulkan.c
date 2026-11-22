@@ -68,7 +68,11 @@ typedef struct VulkanExtensions
 #define SMALL_ALLOCATION_THRESHOLD    2097152  // 2   MiB
 #define SMALL_ALLOCATION_SIZE         16777216 // 16  MiB
 #define LARGE_ALLOCATION_INCREMENT    67108864 // 64  MiB
-#define MAX_UBO_SECTION_SIZE          4096     // 4   KiB
+// Every uniform slot binds this much of its push: the most the API takes.
+#define MAX_UBO_SECTION_SIZE          SDL_GPU_MAX_UNIFORM_DATA_LENGTH
+// Pushes start within the first UNIFORM_BUFFER_SIZE bytes; one section more keeps the last one's
+// bound range inside the buffer.
+#define VULKAN_UNIFORM_BUFFER_SIZE    (UNIFORM_BUFFER_SIZE + MAX_UBO_SECTION_SIZE)
 #define DESCRIPTOR_POOL_SIZE          128
 #define WINDOW_PROPERTY_DATA          "SDL.internal.gpu.vulkan.data"
 
@@ -7994,7 +7998,7 @@ static VulkanUniformBuffer *VULKAN_INTERNAL_AcquireUniformBufferFromPool(
     } else {
         uniformBuffer = VULKAN_INTERNAL_CreateUniformBuffer(
             renderer,
-            UNIFORM_BUFFER_SIZE);
+            VULKAN_UNIFORM_BUFFER_SIZE);
     }
 
     SDL_UnlockMutex(renderer->acquireUniformBufferLock);
@@ -8059,8 +8063,10 @@ static void VULKAN_INTERNAL_PushUniformData(
         return;
     }
 
-    // If there is no more room, acquire a new uniform buffer
-    if (uniformBuffer->writeOffset + blockSize + MAX_UBO_SECTION_SIZE >= uniformBuffer->buffer->size) {
+    /* The slot binds MAX_UBO_SECTION_SIZE bytes from the push's offset, which must end inside the
+     * buffer. The push itself is never longer, so if that section does not fit, acquire a new
+     * uniform buffer. */
+    if (uniformBuffer->writeOffset + MAX_UBO_SECTION_SIZE > uniformBuffer->buffer->size) {
         uniformBuffer = VULKAN_INTERNAL_AcquireUniformBufferFromPool(commandBuffer);
 
         uniformBuffer->drawOffset = 0;
@@ -12761,11 +12767,20 @@ static Uint8 VULKAN_INTERNAL_IsDeviceSuitable(
     VkQueueFamilyProperties *queueProps;
     bool supportsPresent;
     VkPhysicalDeviceFeatures deviceFeatures;
+    VkPhysicalDeviceProperties deviceProperties;
     Uint32 i;
 
     renderer->vkGetPhysicalDeviceFeatures(
         physicalDevice,
         &deviceFeatures);
+    renderer->vkGetPhysicalDeviceProperties(
+        physicalDevice,
+        &deviceProperties);
+
+    // Every uniform slot binds MAX_UBO_SECTION_SIZE bytes.
+    if (deviceProperties.limits.maxUniformBufferRange < MAX_UBO_SECTION_SIZE) {
+        return 0;
+    }
 
     if ((!deviceFeatures.independentBlend && features->desiredVulkan10DeviceFeatures.independentBlend) ||
         (!deviceFeatures.imageCubeArray && features->desiredVulkan10DeviceFeatures.imageCubeArray) ||
@@ -13502,7 +13517,7 @@ static SDL_GPUDevice *VULKAN_CreateDevice(bool debugMode, bool preferLowPower, S
     for (i = 0; i < renderer->uniformBufferPoolCount; i += 1) {
         renderer->uniformBufferPool[i] = VULKAN_INTERNAL_CreateUniformBuffer(
             renderer,
-            UNIFORM_BUFFER_SIZE);
+            VULKAN_UNIFORM_BUFFER_SIZE);
     }
 
     renderer->descriptorSetCachePoolCapacity = 8;

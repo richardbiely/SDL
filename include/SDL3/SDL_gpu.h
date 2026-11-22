@@ -302,6 +302,9 @@
  *
  * It is valid to push uniform data during a render or compute pass.
  *
+ * One push holds at most SDL_GPU_MAX_UNIFORM_DATA_LENGTH bytes. Every backend
+ * lets the shader read that much of it, and a longer push is refused.
+ *
  * Uniforms are best for pushing small amounts of data. If you are pushing
  * more than a matrix or two per call you should consider using a storage
  * buffer instead.
@@ -633,6 +636,21 @@ typedef struct SDL_GPUTilePipeline SDL_GPUTilePipeline;
  * \sa SDL_GetGPUTimestampQueryResults
  */
 #define SDL_GPU_TIMESTAMP_NOT_SAMPLED SDL_MAX_UINT64
+
+/**
+ * The most bytes one uniform push takes.
+ *
+ * A shader may read every byte of a push up to this length on every backend:
+ * 16384 bytes, the uniform buffer range every Vulkan device supports. Metal
+ * and D3D12 allow more, but a push past it is refused on all of them, so code
+ * that works on one backend works on the others.
+ *
+ * \sa SDL_PushGPUVertexUniformData
+ * \sa SDL_PushGPUFragmentUniformData
+ * \sa SDL_PushGPUComputeUniformData
+ * \sa SDL_PushGPUTileUniformData
+ */
+#define SDL_GPU_MAX_UNIFORM_DATA_LENGTH 16384
 
 /**
  * Specifies the primitive topology of a graphics pipeline.
@@ -3333,10 +3351,15 @@ extern SDL_DECLSPEC SDL_GPUCommandBuffer * SDLCALL SDL_AcquireGPUCommandBuffer(
  * For detailed information about accessing uniform data from a shader, please
  * refer to SDL_CreateGPUShader.
  *
+ * The data may be at most SDL_GPU_MAX_UNIFORM_DATA_LENGTH bytes long. A
+ * longer push is refused: it sets an error and leaves the slot's data as it
+ * was.
+ *
  * \param command_buffer a command buffer.
  * \param slot_index the vertex uniform slot to push data to.
  * \param data client data to write.
- * \param length the length of the data to write.
+ * \param length the length of the data to write, at most
+ *               SDL_GPU_MAX_UNIFORM_DATA_LENGTH.
  *
  * \since This function is available since SDL 3.2.0.
  */
@@ -3355,10 +3378,15 @@ extern SDL_DECLSPEC void SDLCALL SDL_PushGPUVertexUniformData(
  * terms this means you must ensure that vec3 and vec4 fields are 16-byte
  * aligned.
  *
+ * The data may be at most SDL_GPU_MAX_UNIFORM_DATA_LENGTH bytes long. A
+ * longer push is refused: it sets an error and leaves the slot's data as it
+ * was.
+ *
  * \param command_buffer a command buffer.
  * \param slot_index the fragment uniform slot to push data to.
  * \param data client data to write.
- * \param length the length of the data to write.
+ * \param length the length of the data to write, at most
+ *               SDL_GPU_MAX_UNIFORM_DATA_LENGTH.
  *
  * \since This function is available since SDL 3.2.0.
  */
@@ -3377,10 +3405,15 @@ extern SDL_DECLSPEC void SDLCALL SDL_PushGPUFragmentUniformData(
  * terms this means you must ensure that vec3 and vec4 fields are 16-byte
  * aligned.
  *
+ * The data may be at most SDL_GPU_MAX_UNIFORM_DATA_LENGTH bytes long. A
+ * longer push is refused: it sets an error and leaves the slot's data as it
+ * was.
+ *
  * \param command_buffer a command buffer.
  * \param slot_index the uniform slot to push data to.
  * \param data client data to write.
- * \param length the length of the data to write.
+ * \param length the length of the data to write, at most
+ *               SDL_GPU_MAX_UNIFORM_DATA_LENGTH.
  *
  * \since This function is available since SDL 3.2.0.
  */
@@ -4797,10 +4830,15 @@ extern SDL_DECLSPEC void SDLCALL SDL_ReleaseGPUTilePipeline(
  * Subsequent tile dispatches in this command buffer read this data, as
  * SDL_PushGPUFragmentUniformData does for draws.
  *
+ * The data may be at most SDL_GPU_MAX_UNIFORM_DATA_LENGTH bytes long. A
+ * longer push is refused: it sets an error and leaves the slot's data as it
+ * was.
+ *
  * \param command_buffer a command buffer.
  * \param slot_index the tile kernel uniform slot to push data to.
  * \param data client data to write.
- * \param length the length of the data to write.
+ * \param length the length of the data to write, at most
+ *               SDL_GPU_MAX_UNIFORM_DATA_LENGTH.
  *
  * \sa SDL_DispatchGPUTilePipeline
  */

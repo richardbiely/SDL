@@ -33,6 +33,8 @@
 #define MAX_COMPUTE_WRITE_TEXTURES     8
 #define MAX_COMPUTE_WRITE_BUFFERS      8
 #define UNIFORM_BUFFER_SIZE            32768
+// One uniform buffer holds the longest push the API takes.
+SDL_COMPILE_TIME_ASSERT(uniform_buffer_holds_a_push, SDL_GPU_MAX_UNIFORM_DATA_LENGTH <= UNIFORM_BUFFER_SIZE);
 #define MAX_VERTEX_BUFFERS             16
 #define MAX_VERTEX_ATTRIBUTES          16
 #define MAX_COLOR_TARGET_BINDINGS      8

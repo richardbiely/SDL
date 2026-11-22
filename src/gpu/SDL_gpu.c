@@ -1745,6 +1745,10 @@ void SDL_PushGPUVertexUniformData(
         SDL_SetError("slot_index exceeds MAX_UNIFORM_BUFFERS_PER_STAGE");
         return;
     }
+    CHECK_PARAM(length > SDL_GPU_MAX_UNIFORM_DATA_LENGTH) {
+        SDL_SetError("length exceeds SDL_GPU_MAX_UNIFORM_DATA_LENGTH");
+        return;
+    }
 
     if (COMMAND_BUFFER_DEVICE->debug_mode) {
         CHECK_COMMAND_BUFFER
@@ -1775,6 +1779,10 @@ void SDL_PushGPUFragmentUniformData(
         SDL_SetError("slot_index exceeds MAX_UNIFORM_BUFFERS_PER_STAGE");
         return;
     }
+    CHECK_PARAM(length > SDL_GPU_MAX_UNIFORM_DATA_LENGTH) {
+        SDL_SetError("length exceeds SDL_GPU_MAX_UNIFORM_DATA_LENGTH");
+        return;
+    }
 
     if (COMMAND_BUFFER_DEVICE->debug_mode) {
         CHECK_COMMAND_BUFFER
@@ -1803,6 +1811,10 @@ void SDL_PushGPUComputeUniformData(
     }
     CHECK_PARAM(slot_index >= MAX_UNIFORM_BUFFERS_PER_STAGE) {
         SDL_SetError("slot_index exceeds MAX_UNIFORM_BUFFERS_PER_STAGE");
+        return;
+    }
+    CHECK_PARAM(length > SDL_GPU_MAX_UNIFORM_DATA_LENGTH) {
+        SDL_SetError("length exceeds SDL_GPU_MAX_UNIFORM_DATA_LENGTH");
         return;
     }
 
@@ -3781,6 +3793,10 @@ void SDL_PushGPUTileUniformData(
     }
     CHECK_PARAM(slot_index >= MAX_UNIFORM_BUFFERS_PER_STAGE) {
         SDL_SetError("slot_index exceeds MAX_UNIFORM_BUFFERS_PER_STAGE");
+        return;
+    }
+    CHECK_PARAM(length > SDL_GPU_MAX_UNIFORM_DATA_LENGTH) {
+        SDL_SetError("length exceeds SDL_GPU_MAX_UNIFORM_DATA_LENGTH");
         return;
     }
 
